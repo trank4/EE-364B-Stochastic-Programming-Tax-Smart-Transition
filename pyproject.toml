@@ -1,0 +1,22 @@
+[project]
+name = "ee364b-tax-smart-transition"
+version = "0.1.0"
+description = "EE364B Stochastic Programming Tax-Smart Transition"
+authors = [
+    {name = "trank4",email = "khoa.tran.uc@gmail.com"}
+]
+readme = "README.md"
+requires-python = "^3.11"
+dependencies = [
+    "numpy (>=2.4.4,<3.0.0)",
+    "scipy (>=1.17.1,<2.0.0)",
+    "cvxpy (>=1.8.2,<2.0.0)",
+    "matplotlib (>=3.10.9,<4.0.0)",
+    "pandas (>=3.0.2,<4.0.0)",
+    "jupyter (>=1.1.1,<2.0.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
