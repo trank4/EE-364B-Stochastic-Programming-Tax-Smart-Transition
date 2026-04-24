@@ -25,3 +25,14 @@ poetry run jupyter notebook
 - **pandas** — data handling (returns, prices, tax lots)
 - **matplotlib** — plotting results
 - **jupyter** — notebooks for exploration and writeup
+
+## Git Practices
+
+### Commit messages
+Write clear, descriptive commit messages that enumerate the specific changes included — not just the intent. The subject line names the primary change; the body bullet-points each distinct file or logical change (e.g. `- Add optimizer.py with StoxOptimizer stub`). Use imperative mood. Never write vague labels like "update files" or "misc changes".
+
+### Staging new files
+After creating any new file, consider whether it belongs in the remote repo. If yes, `git add` it immediately. Skip generated artifacts and anything covered by `.gitignore` (`.venv/`, `__pycache__/`, `.env`, etc.).
+
+### Keeping documentation in sync
+Before every commit, update `README.md` to reflect what changed — repo structure, package APIs, dependencies, setup instructions. Stage the updated README alongside the other changed files.
