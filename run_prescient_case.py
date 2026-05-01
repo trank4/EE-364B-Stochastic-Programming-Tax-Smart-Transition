@@ -90,16 +90,18 @@ if __name__ == "__main__":
     # construct starting position dataframe
     # assuming the portfolio has 1 stock "AAPL" with low cost basis high unrealized gains
     positions = pd.DataFrame(
-        {"Tkr": ["AAPL"], "Amt": [10000000], "CostBasisAmt": [500000]}
+        {"tkr": ["AAPL"], "amt": [10000000], "cost_basis_amt": [500000]}
     )
-    positions["PNL"] = (positions["Amt"] - positions["CostBasisAmt"]) / positions["Amt"]
+    positions["pnl"] = (positions["amt"] - positions["cost_basis_amt"]) / positions[
+        "amt"
+    ]
 
     # assuming for simplicity 1 tax rate of 30%
     tax_rate = 0.3
 
     # assume equally-weighted model of the top 20 tickers
     model = pd.DataFrame(
-        {"Tkr": top20_spy_tickers, "TgtWt": 1 / len(top20_spy_tickers)}
+        {"tkr": top20_spy_tickers, "tgt_wt": 1 / len(top20_spy_tickers)}
     )
 
     # combine everything into inputs dict

@@ -35,8 +35,8 @@ class StoxOptimizer:
 
     def lot_ticker(self, i):
         """helper function to get ticker name from lot indices"""
-        pos_tkrs = list(self.inputs["positions"]["Tkr"])
-        model_tkrs = list(self.inputs["model"]["Tkr"])
+        pos_tkrs = list(self.inputs["positions"]["tkr"])
+        model_tkrs = list(self.inputs["model"]["tkr"])
         if i < self.n_start_pos:
             return pos_tkrs[i]
         else:
@@ -116,5 +116,19 @@ class StoxOptimizer:
                 len(all_tkrs), vtype=GRB.BINARY, name=sell_h_names
             )
 
+            # set prices & cost basis
+            for (i, j), info in lot_info.items():
+                # prices depends on the current filtration period
+                info["price"] = self.inputs["monthly_prices"].iloc[f][info["tkr"]]
+                if i < self.n_start_pos:
+                    # For starting lot, the cost basis is input
+                    info["cost_basis"] = self.inputs["positions"].iloc[i][
+                        "cost_basis_amt"
+                    ]
+                else:
+                    # For other lots, cost basis depends on when the lots was added, so the j in (i,j) of lot indices
+                    info["cost_basis"] = self.inputs["monthly_prices"].iloc[j][
+                        info["tkr"]
+                    ]
             self.filtration[f]["lot_info"] = lot_info
         self.n_lot = total_lot
