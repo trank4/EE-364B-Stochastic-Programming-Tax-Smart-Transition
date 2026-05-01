@@ -20,7 +20,7 @@ class StoxOptimizer:
         # infer number of starting positions
         self.n_start_pos = self.inputs["positions"].shape[0]
         # create filtration
-        self.filtration = [{} for i in range(self.T)]
+        self.filtration = [{} for _ in range(self.T)]
 
         self.n_lot = None  # total lots in optimization, populated later
 

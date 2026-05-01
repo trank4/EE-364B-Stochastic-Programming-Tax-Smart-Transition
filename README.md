@@ -65,7 +65,7 @@ class StoxOptimizer:
 
 We manage a portfolio over $T$ monthly periods. The investor starts with $L$ tax lots — existing stock positions each carrying a cost basis — and wants to transition towards a target model portfolio of $N$ assets while minimizing capital gains taxes incurred along the way.
 
-At each period $t$, the optimizer decides how much of each lot to sell and how much of each asset to buy, subject to budget balance. Selling a lot at a profit triggers a capital gains tax at flat rate $\tau$. The goal is to reach the target weights as efficiently as possible while keeping the tax drag small.
+At each filtration $f$, the optimizer decides how much of each lot to sell and how much of each asset to buy, subject to budget balance. Selling a lot at a profit triggers a capital gains tax at flat rate $\tau$. The goal is to reach the target weights as efficiently as possible while keeping the tax drag small.
 
 ---
 
@@ -75,84 +75,97 @@ At each period $t$, the optimizer decides how much of each lot to sell and how m
 
 | Symbol | Definition |
 |---|---|
-| $t \in \{0, \dots, T-1\}$ | Time period (month) |
-| $k \in \{0, \dots, N-1\}$ | Asset (ticker) index in the model universe |
-| $(i,\, j)$ | Lot identifier: row index $i$, acquired at period $j$ |
-| $\mathcal{L}_t$ | Set of all lots available at period $t$ (see Lot Structure below) |
-| $\mathcal{L}_t(k)$ | Subset of $\mathcal{L}_t$ belonging to ticker $k$ |
+| $f \in \{0, \dots, T-1\}$ | Filtration index (month) |
+| $k \in \{0, \dots, K_f-1\}$ | Ticker index within filtration $f$, where $K_f$ is the number of distinct tickers present at filtration $f$ |
+| $(i,\, j)$ | Lot identifier: row index $i$, acquired at period $j \leq f$ |
+| $\mathcal{L}_f$ | Set of all lots available at filtration $f$ (see Lot Structure below) |
+| $\mathcal{L}_f(k)$ | Subset of $\mathcal{L}_f$ belonging to ticker $k$ |
 
 #### Parameters
 
 | Symbol | Definition |
 |---|---|
-| $T$ | Number of periods |
+| $T$ | Number of filtration periods |
 | $N$ | Number of assets in the model universe |
 | $L$ | Number of starting lots (existing positions) |
-| $p_{k,t}$ | Price of asset $k$ at period $t$ |
-| $w^*_k$ | Target portfolio weight for asset $k$ |
+| $p_{k,f}$ | Market price of ticker $k$ at filtration $f$ |
+| $w^*_k$ | Target portfolio weight for ticker $k$ |
 | $\tau$ | Flat capital gains tax rate |
-| $c_{i,j}$ | Cost basis per unit of lot $(i, j)$ |
+| $c_{i,j}$ | Cost basis of lot $(i, j)$: input value for starting lots ($j=0$), or price at period $j-1$ for purchased lots |
 
 ---
 
 ### Lot Structure
 
-Lots are indexed by a pair $(i,\, j)$ where $j$ is the period the lot was acquired and $i$ identifies the specific lot within that period.
+Each lot is identified by a pair $(i,\, j)$: $j$ is the period the lot was purchased and $i$ is the lot's row index. At filtration $f$, the optimizer has visibility into all lots acquired from period $0$ through $f$. The available lot set grows **triangularly** with $f$:
 
-The set of lots available at period $t$ is **triangular** — it grows as new purchases create new lots:
+$$\mathcal{L}_f = \bigl\{(i,\, j) : j \in \{0, \dots, f\},\quad i \in \{0, \dots, L + j N - 1\}\bigr\}$$
 
-$$\mathcal{L}_t = \bigl\{(i,\, j) : j \in \{0, \dots, t\},\quad i \in \{0, \dots, L + j N - 1\}\bigr\}$$
+The column $j$ of the triangle contains $L + jN$ lots — the $L$ starting lots plus $N$ new lots per purchase period elapsed. At each new filtration $f$, a new column $j = f$ is added with $N$ freshly purchased lots (one per model asset).
 
-- **$j = 0$ (starting lots):** $i \in \{0, \dots, L-1\}$. Each corresponds to one existing position from the input portfolio.
-- **$j > 0$ (purchased lots):** $i \in \{L + (j-1)N, \dots, L + jN - 1\}$ are the $N$ new lots created by buying each model asset at period $j$.
-
-The ticker of lot $(i, j)$ is:
+The ticker of lot $(i, j)$ depends only on the row index $i$:
 
 $$\text{ticker}(i) = \begin{cases} \text{pos\_tkrs}[i] & \text{if } i < L \quad \text{(starting lot)} \\ \text{model\_tkrs}[(i - L) \bmod N] & \text{if } i \geq L \quad \text{(purchased lot)} \end{cases}$$
 
-At period $T-1$, the total number of lots across all periods is:
+The total number of lot variables created across all filtrations is:
 
-$$|\mathcal{L}_{T-1}| = \sum_{j=0}^{T-1} (L + j N) = LT + N\frac{T(T-1)}{2}$$
+$$\sum_{f=0}^{T-1} |\mathcal{L}_f| = \sum_{f=0}^{T-1}\sum_{j=0}^{f}(L + jN) = LT^2/2 + N\,T(T-1)(T+1)/6 \quad \text{(triangular sum)}$$
 
 ---
 
 ### Decision Variables
 
-All variables are defined at every period $t \in \{0, \dots, T-1\}$.
+All variables are replicated at every filtration $f \in \{0, \dots, T-1\}$.
 
-#### Lot-level variables — indexed over $(i,\, j) \in \mathcal{L}_t$
-
-| Variable | Bounds | Description |
-|---|---|---|
-| $x_{i,j,t} \in \mathbb{R}$ | $[0,\, 100]$ | Portfolio weight (%) of lot $(i,j)$ held at period $t$ |
-| $s^l_{i,j,t} \in \mathbb{R}$ | $[0,\, 100]$ | Portfolio weight (%) sold from lot $(i,j)$ at period $t$ |
-
-#### Holding-level variables — indexed over ticker $k$
+#### Lot-level variables — indexed over $(i,\, j) \in \mathcal{L}_f$
 
 | Variable | Bounds | Description |
 |---|---|---|
-| $s^h_{k,t} \in \mathbb{R}$ | $[0,\, 100]$ | Total portfolio weight (%) of ticker $k$ sold at period $t$ |
-| $b^h_{k,t} \in \mathbb{R}$ | $[0,\, 100]$ | Portfolio weight (%) of ticker $k$ bought at period $t$ |
-| $\delta^s_{k,t} \in \{0,1\}$ | binary | 1 if any of ticker $k$ is sold at period $t$ |
-| $\delta^b_{k,t} \in \{0,1\}$ | binary | 1 if any of ticker $k$ is bought at period $t$ |
+| $x_{i,j,f} \in \mathbb{R}$ | $[0,\, 100]$ | Portfolio weight (%) of lot $(i,j)$ held at filtration $f$ |
+| $s^l_{i,j,f} \in \mathbb{R}$ | $[0,\, 100]$ | Portfolio weight (%) sold from lot $(i,j)$ at filtration $f$ |
 
-The holding-level sell weight aggregates lot-level sells:
+#### Holding-level variables — indexed over ticker $k$ at filtration $f$
 
-$$s^h_{k,t} = \sum_{(i,j)\,\in\,\mathcal{L}_t(k)} s^l_{i,j,t}$$
-
-The binary indicators $\delta^s_{k,t}$ and $\delta^b_{k,t}$ are used to enforce that no ticker is simultaneously bought and sold in the same period (a wash-sale / round-trip constraint), and to model per-transaction costs if needed.
+| Variable | Bounds | Description |
+|---|---|---|
+| $s^h_{k,f} \in \mathbb{R}$ | $[0,\, 100]$ | Total portfolio weight (%) of ticker $k$ sold at filtration $f$ |
+| $b^h_{k,f} \in \mathbb{R}$ | $[0,\, 100]$ | Portfolio weight (%) of ticker $k$ bought at filtration $f$ |
+| $\delta^s_{k,f} \in \{0,1\}$ | binary | 1 if any of ticker $k$ is sold at filtration $f$ |
+| $\delta^b_{k,f} \in \{0,1\}$ | binary | 1 if any of ticker $k$ is bought at filtration $f$ |
 
 ---
 
-### Objective and Constraints
+### Constraints
 
-> **In progress.** The objective function and constraints are under active development.
+#### Sell aggregation (`build_wash_sales_constraints`)
 
-The intended objective minimizes a weighted combination of:
-1. **Tax cost** — capital gains taxes triggered by selling appreciated lots: $\tau \sum_t \sum_{(i,j)\in\mathcal{L}_t} s^l_{i,j,t} \cdot \max(p_{\text{ticker}(i),\,t} - c_{i,j},\; 0)$
-2. **Tracking error** — deviation of the end-of-horizon portfolio weights from the target $w^*$
+The holding-level sell weight is the sum of all lot-level sells for that ticker:
 
-Subject to constraints including budget balance (proceeds from sales fund purchases), lot accounting (holdings evolve consistently across periods), and no simultaneous buy/sell of the same ticker.
+$$s^h_{k,f} = \sum_{(i,j)\,\in\,\mathcal{L}_f(k)} s^l_{i,j,f} \qquad \forall\, k,\, f$$
+
+#### Big-M indicator linking
+
+The binary indicators activate only when the corresponding weight is nonzero. With portfolio weights bounded in $[0, 100]$:
+
+$$s^h_{k,f} \leq 100\, \delta^s_{k,f} \qquad \forall\, k,\, f$$
+
+$$b^h_{k,f} \leq 100\, \delta^b_{k,f} \qquad \forall\, k,\, f$$
+
+#### No simultaneous buy and sell (wash-sale prevention)
+
+A ticker cannot be both bought and sold in the same filtration period:
+
+$$\delta^b_{k,f} + \delta^s_{k,f} \leq 1 \qquad \forall\, k,\, f$$
+
+#### Lot dynamics (`build_lot_dynamics_constraints`)
+
+> **In progress.**
+
+#### Objective
+
+> **In progress.** The intended objective minimizes a weighted combination of:
+> 1. **Tax cost** — capital gains taxes on appreciated lots: $\tau \displaystyle\sum_f \sum_{(i,j)\in\mathcal{L}_f} s^l_{i,j,f} \cdot \max\!\bigl(p_{\text{ticker}(i),\,f} - c_{i,j},\; 0\bigr)$
+> 2. **Tracking error** — deviation of end-of-horizon weights from target $w^*$
 
 ---
 
