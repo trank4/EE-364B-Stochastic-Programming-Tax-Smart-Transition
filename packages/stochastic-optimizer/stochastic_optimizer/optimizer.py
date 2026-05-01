@@ -27,6 +27,8 @@ class StoxOptimizer:
     def build(self) -> None:
         """Construct variables, constraints, and objective in self.model."""
         self.build_filtration()
+        self.build_wash_sales_constraints()
+        self.build_lot_dynamics_constraints()
 
     def solve(self) -> None:
         """Invoke the Gurobi solver and extract results."""
@@ -132,4 +134,40 @@ class StoxOptimizer:
                         info["tkr"]
                     ]
             self.filtration[f]["lot_info"] = lot_info
+        self.model.update()
         self.n_lot = total_lot
+
+    def build_wash_sales_constraints(self):
+        for f, filtration in enumerate(self.filtration):
+            tkr_to_lot_indices = filtration["tkr_to_lot_indices"]
+            all_tkrs = list(tkr_to_lot_indices.keys())
+
+            for k, tkr in enumerate(all_tkrs):
+                lot_indices_for_tkr = tkr_to_lot_indices[tkr]
+                # constraint to map sell_wt_l with sell_wt_h
+                self.model.addConstr(
+                    filtration["sell_wt_h"][k]
+                    == gp.quicksum(
+                        filtration["sell_wt_l"][i, j] for i, j in lot_indices_for_tkr
+                    ),
+                    name=f"sell_l_to_h_mapping({tkr},f={f})",
+                )
+                # constraint that sell_wt_h is upperbound by sell_h * 100
+                self.model.addConstr(
+                    filtration["sell_wt_h"][k] <= filtration["sell_h"][k] * 100,
+                    name=f"upper_sell_binary({tkr}, f={f})",
+                )
+                # constraint that buy_wt_h is upperbound by buy_h * 100
+                self.model.addConstr(
+                    filtration["buy_wt_h"][k] <= filtration["buy_h"][k] * 100,
+                    name=f"upper_buy_binary({tkr}, f={f})",
+                )
+                # constraint that only one of buy_h and sell_h can be one
+                self.model.addConstr(
+                    filtration["buy_h"][k] + filtration["sell_h"][k] <= 1.0,
+                    name=f"upper_buy_binary({tkr}, f={f})",
+                )
+        self.model.update()
+
+    def build_lot_dynamics_constraints(self):
+        pass
