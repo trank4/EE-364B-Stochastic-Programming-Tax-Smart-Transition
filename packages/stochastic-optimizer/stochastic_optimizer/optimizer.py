@@ -126,8 +126,9 @@ class StoxOptimizer:
                         "cost_basis_amt"
                     ]
                 else:
-                    # For other lots, cost basis depends on when the lots was added, so the j in (i,j) of lot indices
-                    info["cost_basis"] = self.inputs["monthly_prices"].iloc[j][
+                    # this block of code only executed for j >= 1 as at j = 0, there are only starting lots
+                    # For other lots, cost basis depends on when the lots was added, so for lot (i,j) it's the price of previous period j - 1
+                    info["cost_basis"] = self.inputs["monthly_prices"].iloc[j - 1][
                         info["tkr"]
                     ]
             self.filtration[f]["lot_info"] = lot_info
