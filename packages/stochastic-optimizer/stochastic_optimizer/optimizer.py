@@ -177,4 +177,34 @@ class StoxOptimizer:
         self.model.update()
 
     def build_lot_dynamics_constraints(self):
-        pass
+        for f in range(len(self.filtration) - 1):
+            current_filtration = self.filtration[f]
+            next_filtration = self.filtration[f + 1]
+            # for existing lots in current_filtration, the dynamics to next filtration depends on sells
+            for i, j in current_filtration["lot_info"].keys():
+                lot_name = current_filtration["lot_info"][(i, j)]["tkr"]
+                # constraint to link the current lot, sell_wt_l and the associated lot in next filtration
+                self.model.addConstr(
+                    current_filtration["lot"][i, j]
+                    - current_filtration["sell_wt_l"][i, j]
+                    == next_filtration["lot"][i, j],
+                    name=f"sell_lot_dynamics({lot_name},l={i},t={j},from f={f} to f={f+1})",
+                )
+
+            # for new lots that exist only in next filtration, the dynamics depends on buys
+            new_lot_indices = (
+                next_filtration["lot_info"].keys()
+                - current_filtration["lot_info"].keys()
+            )
+            for i, j in new_lot_indices:
+                lot_name = next_filtration["lot_info"][(i, j)]["tkr"]
+                # make sure we get the correct buy variables
+                assert current_filtration["buy_wt_h"][lot_name] is not None
+                # constraint to link the buy_wt_h of the current filtration to new lots in next filtration
+                self.model.addConstr(
+                    next_filtration["lot"][i, j]
+                    == current_filtration["buy_wt_h"][lot_name],
+                    name=f"buy_lot_dynamics({lot_name},l={i},t={j}, from f={f} to f={f+1})",
+                )
+
+        self.model.update()
