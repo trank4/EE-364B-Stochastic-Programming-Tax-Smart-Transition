@@ -1,6 +1,7 @@
 from collections import defaultdict
 
 import gurobipy as gp
+import numpy as np
 from gurobipy import GRB
 
 
@@ -31,6 +32,8 @@ class StoxOptimizer:
 
         self.n_lot = None  # total lots in optimization, populated later
 
+        self.objectives = {}  # dict to contain objective variables and their priorities
+
     def build(self) -> None:
         """
         Assemble the full Gurobi model by running each build stage in order:
@@ -41,6 +44,11 @@ class StoxOptimizer:
         self.build_starting_lot_constraints()
         self.build_wash_sales_constraints()
         self.build_lot_dynamics_constraints()
+
+        # build hierarchical objectives for lexicographic optimization
+        self.build_terminal_deviation_objective()
+        self.build_tax_cost_objective()
+        self.set_objective_hierarchy()
 
     def solve(self) -> None:
         """
@@ -93,6 +101,20 @@ class StoxOptimizer:
                 lot_indices, lb=0.0, ub=100, name=lot_names
             )
 
+            # --- ticker holdings -> lot indices mapping ---
+            tkr_to_lot_indices = defaultdict(list)
+            for i, j in lot_indices:
+                tkr_to_lot_indices[self.lot_ticker(i, j)].append((i, j))
+            self.filtration[f]["tkr_to_lot_indices"] = dict(tkr_to_lot_indices)
+
+            # set up holding weight variables
+            wt_h_names = {
+                tkr: f"wt_h({tkr}, f={f})" for tkr in tkr_to_lot_indices.keys()
+            }
+            self.filtration[f]["wt_h"] = self.model.addVars(
+                tkr_to_lot_indices.keys(), lb=0.0, ub=100, name=wt_h_names
+            )
+
             # set up sell_wt_l
             # sell_wt has the same indices as lots, because we can decide selling these lots to reach next filtration
             sell_wt_l_names = {
@@ -102,12 +124,6 @@ class StoxOptimizer:
             self.filtration[f]["sell_wt_l"] = self.model.addVars(
                 lot_indices, lb=0.0, ub=100, name=sell_wt_l_names
             )
-
-            # --- ticker holdings -> lot indices mapping ---
-            tkr_to_lot_indices = defaultdict(list)
-            for i, j in lot_indices:
-                tkr_to_lot_indices[self.lot_ticker(i, j)].append((i, j))
-            self.filtration[f]["tkr_to_lot_indices"] = dict(tkr_to_lot_indices)
 
             # set up sell_wt_h
             all_tkrs_to_sell = list(tkr_to_lot_indices.keys())
@@ -268,3 +284,47 @@ class StoxOptimizer:
                 == self.inputs["positions"].iloc[i]["wt"],
                 name=f"start_lot_wt({i},t={j})",
             )
+
+    def build_terminal_deviation_objective(self):
+        last_filtration = self.filtration[-1]
+
+        # create variables for terminal deviation
+        model_tkrs = list(self.inputs["model"]["tkr"])
+        terminal_dev_names = {tkr: f"terminal_dev({tkr})" for tkr in model_tkrs}
+        terminal_dev_ub = np.maximum(
+            100 - self.inputs["model"]["tgt_wt"].values * 100,
+            self.inputs["model"]["tgt_wt"].values * 100,
+        )
+        terminal_dev = self.model.addVars(
+            model_tkrs, lb=0, ub=terminal_dev_ub, name=terminal_dev_names
+        )
+
+        # set up terminal deviation objective variable
+        total_terminal_dev = self.model.addVar(name="total_terminal_dev_objective")
+        self.objectives["total_terminal_dev"] = [total_terminal_dev, 0]
+        self.model.addConstr(
+            total_terminal_dev == gp.quicksum(terminal_dev[tkr] for tkr in model_tkrs),
+            name="total_terminal_dev_objective",
+        )
+
+        for tkr in terminal_dev_names.keys():
+            tkr_tgt_wt = (
+                self.inputs["model"]
+                .loc[self.inputs["model"]["tkr"] == tkr, "tgt_wt"]
+                .item()
+                * 100
+            )
+            self.model.addConstr(
+                last_filtration["wt_h"][tkr] - tkr_tgt_wt <= terminal_dev[tkr],
+                name=f"upper_bound_terminal_dev({tkr})",
+            )
+            self.model.addConstr(
+                tkr_tgt_wt - last_filtration["wt_h"][tkr] <= terminal_dev[tkr],
+                name=f"lower_bound_terminal_dev({tkr})",
+            )
+
+    def build_tax_cost_objective(self):
+        pass
+
+    def set_objective_hierarchy(self):
+        pass
