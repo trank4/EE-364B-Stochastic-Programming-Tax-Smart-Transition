@@ -139,13 +139,12 @@ class StoxOptimizer:
     def build_wash_sales_constraints(self):
         for f, filtration in enumerate(self.filtration):
             tkr_to_lot_indices = filtration["tkr_to_lot_indices"]
-            all_tkrs = list(tkr_to_lot_indices.keys())
 
-            for k, tkr in enumerate(all_tkrs):
+            for tkr in self.filtration[f]["all_tkrs_to_sell"]:
                 lot_indices_for_tkr = tkr_to_lot_indices[tkr]
                 # constraint to map sell_wt_l with sell_wt_h
                 self.model.addConstr(
-                    filtration["sell_wt_h"][k]
+                    filtration["sell_wt_h"][tkr]
                     == gp.quicksum(
                         filtration["sell_wt_l"][i, j] for i, j in lot_indices_for_tkr
                     ),
@@ -153,17 +152,26 @@ class StoxOptimizer:
                 )
                 # constraint that sell_wt_h is upperbound by sell_h * 100
                 self.model.addConstr(
-                    filtration["sell_wt_h"][k] <= filtration["sell_h"][k] * 100,
+                    filtration["sell_wt_h"][tkr] <= filtration["sell_h"][tkr] * 100,
                     name=f"upper_sell_binary({tkr}, f={f})",
                 )
+
+            for tkr in self.filtration[f]["all_tkrs_to_buy"]:
                 # constraint that buy_wt_h is upperbound by buy_h * 100
                 self.model.addConstr(
-                    filtration["buy_wt_h"][k] <= filtration["buy_h"][k] * 100,
+                    filtration["buy_wt_h"][tkr] <= filtration["buy_h"][tkr] * 100,
                     name=f"upper_buy_binary({tkr}, f={f})",
                 )
+
+            tkrs_both_buy_and_sell = [
+                tkr
+                for tkr in self.filtration[f]["all_tkrs_to_sell"]
+                if tkr in self.filtration[f]["all_tkrs_to_buy"]
+            ]
+            for tkr in tkrs_both_buy_and_sell:
                 # constraint that only one of buy_h and sell_h can be one
                 self.model.addConstr(
-                    filtration["buy_h"][k] + filtration["sell_h"][k] <= 1.0,
+                    filtration["buy_h"][tkr] + filtration["sell_h"][tkr] <= 1.0,
                     name=f"upper_buy_binary({tkr}, f={f})",
                 )
         self.model.update()
