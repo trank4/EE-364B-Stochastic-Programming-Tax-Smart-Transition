@@ -35,35 +35,31 @@ class StoxOptimizer:
         self.model.optimize()
         # get solutions
 
-    def lot_ticker(self, i):
+    def lot_ticker(self, i, j):
         """helper function to get ticker name from lot indices"""
         pos_tkrs = list(self.inputs["positions"]["tkr"])
         model_tkrs = list(self.inputs["model"]["tkr"])
-        if i < self.n_start_pos:
+        if j == 0:
             return pos_tkrs[i]
         else:
-            block_idx = (i - self.n_start_pos) % self.n_asset
-            return model_tkrs[block_idx]
+            return model_tkrs[i]
 
     def build_filtration(self) -> None:
         """Build filtration variables."""
         total_lot = 0
+        # set up lot variables
+        # first period only include starting lots
+        # after each filtration, there is a new column with n_asset new lots that we can sell from
+        # So the total number of lots grows linearly with filtration = start lots + f * n_asset
+        lot_indices = [(i, 0) for i in range(self.n_start_pos)]
         for f in range(self.T):
-            # set up lot variables
-            # the lot structure is triangular with ragged columns
-            # we start with lots existing in the starting positions
-            # after each filtration, there is a new column with n_asset new lots that we can sell from
-            lot_indices = [
-                (i, j)
-                for j in range(f + 1)
-                for i in range(self.n_start_pos + j * self.n_asset)
-            ]
+            assert len(lot_indices) == self.n_start_pos + f * self.n_asset
             total_lot += len(lot_indices)
             lot_info = {
                 (i, j): {} for i, j in lot_indices
             }  # truth source for all info lot-level
             # set up the ticker names associated with each lot
-            lot_info = {(i, j): {"tkr": self.lot_ticker(i)} for (i, j) in lot_info}
+            lot_info = {(i, j): {"tkr": self.lot_ticker(i, j)} for (i, j) in lot_info}
             lot_names = {
                 (i, j): f"lot({info['tkr']},l={i},t={j},f={f})"
                 for (i, j), info in lot_info.items()
@@ -85,37 +81,36 @@ class StoxOptimizer:
             # --- ticker holdings -> lot indices mapping ---
             tkr_to_lot_indices = defaultdict(list)
             for i, j in lot_indices:
-                tkr_to_lot_indices[self.lot_ticker(i)].append((i, j))
+                tkr_to_lot_indices[self.lot_ticker(i, j)].append((i, j))
             self.filtration[f]["tkr_to_lot_indices"] = dict(tkr_to_lot_indices)
 
             # set up sell_wt_h
-            all_tkrs = list(tkr_to_lot_indices.keys())
+            all_tkrs_to_sell = list(tkr_to_lot_indices.keys())
+            self.filtration[f]["all_tkrs_to_sell"] = all_tkrs_to_sell
             sell_wt_h_names = {
-                i: f"sell_wt_h({tkr}, f={f})" for i, tkr in enumerate(all_tkrs)
+                tkr: f"sell_wt_h({tkr}, f={f})" for tkr in all_tkrs_to_sell
             }
             self.filtration[f]["sell_wt_h"] = self.model.addVars(
-                len(all_tkrs), lb=0.0, ub=100, name=sell_wt_h_names
+                all_tkrs_to_sell, lb=0.0, ub=100, name=sell_wt_h_names
             )
 
             # set up buy_wt_h
-            buy_wt_h_names = {
-                i: f"buy_wt_h({tkr}, f={f})" for i, tkr in enumerate(all_tkrs)
-            }
+            all_tkrs_to_buy = list(self.inputs["model"]["tkr"])
+            self.filtration[f]["all_tkrs_to_buy"] = all_tkrs_to_buy
+            buy_wt_h_names = {tkr: f"buy_wt_h({tkr}, f={f})" for tkr in all_tkrs_to_buy}
             self.filtration[f]["buy_wt_h"] = self.model.addVars(
-                len(all_tkrs), lb=0.0, ub=100, name=buy_wt_h_names
+                all_tkrs_to_buy, lb=0.0, ub=100, name=buy_wt_h_names
             )
 
             # set up buy_h
-            buy_h_names = {i: f"buy_h({tkr}, f={f})" for i, tkr in enumerate(all_tkrs)}
+            buy_h_names = {tkr: f"buy_h({tkr}, f={f})" for tkr in all_tkrs_to_buy}
             self.filtration[f]["buy_h"] = self.model.addVars(
-                len(all_tkrs), vtype=GRB.BINARY, name=buy_h_names
+                all_tkrs_to_buy, vtype=GRB.BINARY, name=buy_h_names
             )
             # set up sell_h
-            sell_h_names = {
-                i: f"sell_h({tkr}, f={f})" for i, tkr in enumerate(all_tkrs)
-            }
+            sell_h_names = {tkr: f"sell_h({tkr}, f={f})" for tkr in all_tkrs_to_sell}
             self.filtration[f]["sell_h"] = self.model.addVars(
-                len(all_tkrs), vtype=GRB.BINARY, name=sell_h_names
+                all_tkrs_to_sell, vtype=GRB.BINARY, name=sell_h_names
             )
 
             # set prices & cost basis
@@ -134,6 +129,10 @@ class StoxOptimizer:
                         info["tkr"]
                     ]
             self.filtration[f]["lot_info"] = lot_info
+
+            # update lot indices for next filtration
+            if f < self.T - 1:  # dont update in last filtration
+                lot_indices += [(i, f + 1) for i in range(self.n_asset)]
         self.model.update()
         self.n_lot = total_lot
 
