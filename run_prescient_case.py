@@ -95,6 +95,7 @@ if __name__ == "__main__":
     positions["pnl"] = (positions["amt"] - positions["cost_basis_amt"]) / positions[
         "amt"
     ]
+    positions["wt"] = positions["amt"] / positions["amt"].sum()
 
     # assuming for simplicity 1 tax rate of 30%
     tax_rate = 0.3

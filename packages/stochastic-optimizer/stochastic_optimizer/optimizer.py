@@ -27,6 +27,7 @@ class StoxOptimizer:
     def build(self) -> None:
         """Construct variables, constraints, and objective in self.model."""
         self.build_filtration()
+        self.build_starting_lot_constraints()
         self.build_wash_sales_constraints()
         self.build_lot_dynamics_constraints()
 
@@ -182,7 +183,7 @@ class StoxOptimizer:
             next_filtration = self.filtration[f + 1]
             # for existing lots in current_filtration, the dynamics to next filtration depends on sells
             for i, j in current_filtration["lot_info"].keys():
-                lot_name = current_filtration["lot_info"][(i, j)]["tkr"]
+                lot_name = current_filtration["lot_info"][i, j]["tkr"]
                 # constraint to link the current lot, sell_wt_l and the associated lot in next filtration
                 self.model.addConstr(
                     current_filtration["lot"][i, j]
@@ -197,7 +198,7 @@ class StoxOptimizer:
                 - current_filtration["lot_info"].keys()
             )
             for i, j in new_lot_indices:
-                lot_name = next_filtration["lot_info"][(i, j)]["tkr"]
+                lot_name = next_filtration["lot_info"][i, j]["tkr"]
                 # make sure we get the correct buy variables
                 assert current_filtration["buy_wt_h"][lot_name] is not None
                 # constraint to link the buy_wt_h of the current filtration to new lots in next filtration
@@ -208,3 +209,16 @@ class StoxOptimizer:
                 )
 
         self.model.update()
+
+    def build_starting_lot_constraints(self):
+        starting_filtration = self.filtration[0]
+        for i, j in starting_filtration["lot_info"].keys():
+            assert (
+                self.inputs["positions"].iloc[i]["tkr"]
+                == starting_filtration["lot_info"][i, j]["tkr"]
+            )
+            self.model.addConstr(
+                starting_filtration["lot"][i, j]
+                == self.inputs["positions"].iloc[i]["wt"],
+                name=f"start_lot_wt({i},t={j})",
+            )
