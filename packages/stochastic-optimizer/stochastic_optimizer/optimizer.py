@@ -5,7 +5,14 @@ from gurobipy import GRB
 
 
 class StoxOptimizer:
-    """Stochastic portfolio transition optimizer backed by Gurobi."""
+    """
+    Stochastic portfolio transition optimizer backed by Gurobi.
+
+    Models a multi-period tax-smart transition from a starting portfolio to a
+    target model portfolio. At each filtration period the optimizer can sell
+    existing lots and buy new ones. The full problem is assembled by calling build() then solved by
+    calling solve().
+    """
 
     def __init__(self, inputs) -> None:
         self.model = gp.Model("stochastic_optimizer")
@@ -25,19 +32,30 @@ class StoxOptimizer:
         self.n_lot = None  # total lots in optimization, populated later
 
     def build(self) -> None:
-        """Construct variables, constraints, and objective in self.model."""
+        """
+        Assemble the full Gurobi model by running each build stage in order:
+        filtration variables, starting-lot anchors, wash-sale constraints, and
+        lot dynamics constraints. Must be called before solve().
+        """
         self.build_filtration()
         self.build_starting_lot_constraints()
         self.build_wash_sales_constraints()
         self.build_lot_dynamics_constraints()
 
     def solve(self) -> None:
-        """Invoke the Gurobi solver and extract results."""
+        """
+        Hand the assembled model to the Gurobi solver and extract the solution.
+        build() must be called first.
+        """
         self.model.optimize()
         # get solutions
 
     def lot_ticker(self, i, j):
-        """helper function to get ticker name from lot indices"""
+        """
+        Returns the ticker string for lot (i, j). Starting lots (j == 0) map to
+        the i-th position in the input portfolio; purchased lots (j > 0) map to
+        the i-th asset in the model universe.
+        """
         pos_tkrs = list(self.inputs["positions"]["tkr"])
         model_tkrs = list(self.inputs["model"]["tkr"])
         if j == 0:
@@ -46,7 +64,13 @@ class StoxOptimizer:
             return model_tkrs[i]
 
     def build_filtration(self) -> None:
-        """Build filtration variables."""
+        """
+        Creates all Gurobi decision variables for every filtration period and
+        stores them in self.filtration[f]. The lot set grows by N new lots each
+        period (one per model asset), producing a triangular structure over time.
+        Also computes and caches each lot's current market price and cost basis
+        so constraint-building methods can read them directly from lot_info.
+        """
         total_lot = 0
         # set up lot variables
         # first period only include starting lots
@@ -138,6 +162,16 @@ class StoxOptimizer:
         self.n_lot = total_lot
 
     def build_wash_sales_constraints(self):
+        """
+        Adds three groups of constraints for every filtration period:
+        1. Aggregation — sell_wt_h[tkr] equals the sum of sell_wt_l across all
+           lots of that ticker, linking lot-level and holding-level sell weights.
+        2. Big-M linking — sell_wt_h and buy_wt_h are each upper-bounded by 100
+           times their binary indicator, so a weight can only be nonzero when the
+           corresponding indicator is 1.
+        3. Wash-sale prevention — for tickers that appear in both the sell and buy
+           universes, buy_h + sell_h <= 1 prevents simultaneous buy and sell.
+        """
         for f, filtration in enumerate(self.filtration):
             tkr_to_lot_indices = filtration["tkr_to_lot_indices"]
 
@@ -178,6 +212,13 @@ class StoxOptimizer:
         self.model.update()
 
     def build_lot_dynamics_constraints(self):
+        """
+        Links the portfolio state across consecutive filtration periods.
+        For lots that already exist in the current filtration, the holding in
+        the next period equals the current holding minus whatever was sold.
+        For lots that are new in the next filtration (just purchased), their
+        initial holding is set equal to the buy weight from the current period.
+        """
         for f in range(len(self.filtration) - 1):
             current_filtration = self.filtration[f]
             next_filtration = self.filtration[f + 1]
@@ -211,6 +252,11 @@ class StoxOptimizer:
         self.model.update()
 
     def build_starting_lot_constraints(self):
+        """
+        Anchors the lot weights at filtration 0 to the actual portfolio weights
+        from the input positions. Without this, the solver would be free to set
+        the initial holdings to any value.
+        """
         starting_filtration = self.filtration[0]
         for i, j in starting_filtration["lot_info"].keys():
             assert (
