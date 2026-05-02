@@ -90,11 +90,11 @@ if __name__ == "__main__":
     # construct starting position dataframe
     # assuming the portfolio has 1 stock "AAPL" with low cost basis high unrealized gains
     positions = pd.DataFrame(
-        {"tkr": ["AAPL"], "amt": [10000000], "cost_basis_amt": [500000]}
+        {"tkr": ["AAPL"], "amt": [1000000], "cost_basis_amt": [500000]}
     )
     positions["pnl"] = (positions["amt"] - positions["cost_basis_amt"]) / positions[
         "amt"
-    ]
+    ].sum()
     positions["wt"] = positions["amt"] / positions["amt"].sum()
 
     # assuming for simplicity 1 tax rate of 30%
@@ -110,7 +110,8 @@ if __name__ == "__main__":
         "positions": positions,
         "tax_rate": tax_rate,
         "model": model,
-        "monthly_prices": monthly_prices,
+        "monthly_prices": [monthly_prices],
+        "scenario_prob": None,  # A list of probabilities for scenarios. None mean equally likely.
     }
     # build and run optimizer
     run_optimizer(inputs)

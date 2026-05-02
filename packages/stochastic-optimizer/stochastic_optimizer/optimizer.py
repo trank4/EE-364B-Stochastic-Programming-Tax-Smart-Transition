@@ -20,7 +20,8 @@ class StoxOptimizer:
         self.inputs = inputs
 
         # infer number of period T from inputs
-        self.T = self.inputs["monthly_prices"].shape[0]
+        # monthly_prices can be list of prices for multiple scenarios, but they should have same number of periods
+        self.T = self.inputs["monthly_prices"][0].shape[0]
 
         # infer number of assets in the universe
         self.n_asset = self.inputs["model"].shape[0]
@@ -157,19 +158,31 @@ class StoxOptimizer:
 
             # set prices & cost basis
             for (i, j), info in lot_info.items():
-                # prices depends on the current filtration period
-                info["price"] = self.inputs["monthly_prices"].iloc[f][info["tkr"]]
-                if i < self.n_start_pos:
-                    # For starting lot, the cost basis is input
-                    info["cost_basis"] = self.inputs["positions"].iloc[i][
-                        "cost_basis_amt"
-                    ]
-                else:
-                    # this block of code only executed for j >= 1 as at j = 0, there are only starting lots
-                    # For other lots, cost basis depends on when the lots was added, so for lot (i,j) it's the price of previous period j - 1
-                    info["cost_basis"] = self.inputs["monthly_prices"].iloc[j - 1][
-                        info["tkr"]
-                    ]
+                info["price"] = []
+                info["cost_basis_price"] = []
+                # loops through all scenarios, this will only affect tax cost objective
+                for scenario_prices in self.inputs["monthly_prices"]:
+                    # prices depends on the current filtration period
+                    tkr_price = scenario_prices.iloc[f][info["tkr"]]
+                    info["price"].append(tkr_price)
+                    if i < self.n_start_pos:
+                        # For starting lot, the cost basis is input
+                        cost_basis_amt = self.inputs["positions"].iloc[i][
+                            "cost_basis_amt"
+                        ]
+                        tkr_shares = self.inputs["positions"].iloc[i]["amt"] / tkr_price
+                        cost_basis_price = cost_basis_amt / (tkr_shares)
+                        info["cost_basis_price"].append(cost_basis_price)
+                    else:
+                        # this block of code only executed for j >= 1 as at j = 0, there are only starting lots
+                        # For other lots, cost basis depends on when the lots was added, so for lot (i,j) it's the price of previous period j - 1
+                        info["cost_basis_price"].append(
+                            scenario_prices.iloc[j - 1][info["tkr"]]
+                        )
+                if j == 0:
+                    assert (
+                        len(set(info["price"])) == 1
+                    ), "first period prices must equal across scenarios"
             self.filtration[f]["lot_info"] = lot_info
 
             # update lot indices for next filtration
@@ -341,7 +354,42 @@ class StoxOptimizer:
             )
 
     def build_tax_cost_objective(self):
-        pass
+        """we want to minimize the expected tax cost realized from all sells across all filtrations and scenarios
+            we assume that, the optimizer will take the same action across all scenarios
+         this assumption simplifies and make the optimization problem more tractable as it is equivalent to using the same variables across all scenarios
+         different prices in scenarios will only affect the tax cost objective, and no where else.
+        And if we assume same likelihood for every scenarios, minimizing expected tax cost across scenario is equivalent to minimizing sum of tax cost across scenarios.
+         Assume tax cost is calculated as ."""
+        # tax scaling factor to improve ranges of tax terms
+        tax_sf = 100
+        # create total tax cost objective variable (across all filtrations and all scenarios)
+        # the lower bound is -inf to minimize tax cost as much as possible
+        total_tax_cost = self.model.addVar(lb=-GRB.INFINITY, name="total_tax_cost")
+        # create list to hold all lot tax cost
+        lot_tax_cost_list = []
+        for s in range(len(self.inputs["monthly_prices"])):
+            if self.inputs["scenario_prob"]:
+                assert sum(self.inputs["scenario_prob"]) == 1
+                prob = self.inputs["scenario_prob"][s]
+            else:
+                prob = 1
+            for f, filtration in enumerate(self.filtration):
+                for i, j in filtration["lot_info"].keys():
+                    lot_price = filtration["lot_info"][i, j]["price"][s]
+                    lot_cost_basis_price = filtration["lot_info"][i, j][
+                        "cost_basis_price"
+                    ][s]
+                    lot_tax_cost = (
+                        prob
+                        * filtration["sell_wt_l"][i, j]
+                        * filtration["lot"][i, j]
+                        * (1 - lot_cost_basis_price / lot_price)
+                    )
+                    lot_tax_cost_list.append(lot_tax_cost)
+        self.model.addConstr(
+            gp.quicksum(lot_tax_cost_list) <= total_tax_cost,
+            name="total_tax_cost_objective",
+        )
 
     def set_objective_hierarchy(self):
         pass
