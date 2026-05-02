@@ -41,6 +41,7 @@ class StoxOptimizer:
         lot dynamics constraints. Must be called before solve().
         """
         self.build_filtration()
+        self.build_lot_holding_linking_constraints()
         self.build_starting_lot_constraints()
         self.build_wash_sales_constraints()
         self.build_lot_dynamics_constraints()
@@ -176,6 +177,22 @@ class StoxOptimizer:
                 lot_indices += [(i, f + 1) for i in range(self.n_asset)]
         self.model.update()
         self.n_lot = total_lot
+
+    def build_lot_holding_linking_constraints(self):
+        """
+        Defines wt_h[tkr] as the sum of all lot weights belonging to that ticker.
+        This makes wt_h the canonical per-ticker holding weight that downstream
+        constraints (terminal deviation objective) can reference
+        without having to sum over lots themselves.
+        """
+        for f, filtration in enumerate(self.filtration):
+            tkr_to_lot_indices = filtration["tkr_to_lot_indices"]
+            for tkr, lot_indices in tkr_to_lot_indices.items():
+                self.model.addConstr(
+                    filtration["wt_h"][tkr]
+                    == gp.quicksum(filtration["lot"][i, j] for i, j in lot_indices),
+                    name=f"lot_to_wt_h({tkr},f={f})",
+                )
 
     def build_wash_sales_constraints(self):
         """
