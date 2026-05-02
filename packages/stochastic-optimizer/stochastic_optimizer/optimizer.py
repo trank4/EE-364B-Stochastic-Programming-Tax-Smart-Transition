@@ -354,14 +354,17 @@ class StoxOptimizer:
             )
 
     def build_tax_cost_objective(self):
-        """we want to minimize the expected tax cost realized from all sells across all filtrations and scenarios
-            we assume that, the optimizer will take the same action across all scenarios
-         this assumption simplifies and make the optimization problem more tractable as it is equivalent to using the same variables across all scenarios
-         different prices in scenarios will only affect the tax cost objective, and no where else.
+        """we want to minimize the expected tax cost realized from all sells across all filtrations and scenarios.
+        We assume that, the optimizer will take the same action across all scenarios.
+        This assumption simplifies and make the optimization problem more tractable as it is equivalent to using the same variables across all scenarios.
+        Different prices in scenarios will only affect the tax cost objective, and no where else.
         And if we assume same likelihood for every scenarios, minimizing expected tax cost across scenario is equivalent to minimizing sum of tax cost across scenarios.
-         Assume tax cost is calculated as ."""
-        # tax scaling factor to improve ranges of tax terms
-        tax_sf = 100
+        Assume tax cost is calculated as follow:
+        tax of selling from a lot = $_lot_sell_amount - ($_lot_sell_amount / price) * cost_basis_price
+                                  = $_lot_sell_amount * (1 - cost_basis_price/price)
+        -> (tax / total_aum) = ($_lot_sell_amount / total_aum) * (1 - cost_basis_price/price)
+                             = sell_wt_l * (1 - cost_basis_price/price)
+        """
         # create total tax cost objective variable (across all filtrations and all scenarios)
         # the lower bound is -inf to minimize tax cost as much as possible
         total_tax_cost = self.model.addVar(lb=-GRB.INFINITY, name="total_tax_cost")
@@ -382,7 +385,6 @@ class StoxOptimizer:
                     lot_tax_cost = (
                         prob
                         * filtration["sell_wt_l"][i, j]
-                        * filtration["lot"][i, j]
                         * (1 - lot_cost_basis_price / lot_price)
                     )
                     lot_tax_cost_list.append(lot_tax_cost)
