@@ -165,12 +165,15 @@ class StoxOptimizer:
                     # prices depends on the current filtration period
                     tkr_price = scenario_prices.iloc[f][info["tkr"]]
                     info["price"].append(tkr_price)
-                    if i < self.n_start_pos:
+                    if j == 0:
                         # For starting lot, the cost basis is input
                         cost_basis_amt = self.inputs["positions"].iloc[i][
                             "cost_basis_amt"
                         ]
-                        tkr_shares = self.inputs["positions"].iloc[i]["amt"] / tkr_price
+                        tkr_shares = (
+                            self.inputs["positions"].iloc[i]["amt"]
+                            / scenario_prices.iloc[0][info["tkr"]]
+                        )
                         cost_basis_price = cost_basis_amt / (tkr_shares)
                         info["cost_basis_price"].append(cost_basis_price)
                     else:
@@ -253,8 +256,10 @@ class StoxOptimizer:
                 # constraint that only one of buy_h and sell_h can be one
                 self.model.addConstr(
                     filtration["buy_h"][tkr] + filtration["sell_h"][tkr] <= 1.0,
-                    name=f"upper_buy_binary({tkr}, f={f})",
+                    name=f"buy_sell_exclusivity({tkr}, f={f})",
                 )
+
+            # todo: sum buy = sum sell constraint
         self.model.update()
 
     def build_lot_dynamics_constraints(self):
@@ -311,7 +316,7 @@ class StoxOptimizer:
             )
             self.model.addConstr(
                 starting_filtration["lot"][i, j]
-                == self.inputs["positions"].iloc[i]["wt"],
+                == self.inputs["positions"].iloc[i]["wt"] * 100,
                 name=f"start_lot_wt({i},t={j})",
             )
 
@@ -331,7 +336,7 @@ class StoxOptimizer:
 
         # set up terminal deviation objective variable
         total_terminal_dev = self.model.addVar(name="total_terminal_dev_objective")
-        self.objectives["total_terminal_dev"] = [total_terminal_dev, 0]
+        self.objectives["total_terminal_dev"] = [total_terminal_dev, 1]
         self.model.addConstr(
             total_terminal_dev == gp.quicksum(terminal_dev[tkr] for tkr in model_tkrs),
             name="total_terminal_dev_objective",
@@ -368,6 +373,7 @@ class StoxOptimizer:
         # create total tax cost objective variable (across all filtrations and all scenarios)
         # the lower bound is -inf to minimize tax cost as much as possible
         total_tax_cost = self.model.addVar(lb=-GRB.INFINITY, name="total_tax_cost")
+        self.objectives["total_tax_cost"] = [total_tax_cost, 0]
         # create list to hold all lot tax cost
         lot_tax_cost_list = []
         for s in range(len(self.inputs["monthly_prices"])):
@@ -375,6 +381,8 @@ class StoxOptimizer:
                 assert sum(self.inputs["scenario_prob"]) == 1
                 prob = self.inputs["scenario_prob"][s]
             else:
+                # minimization expectation with equal probabilities is equivalent to minimization of sum
+                # set to 1 to avoid scaling issue
                 prob = 1
             for f, filtration in enumerate(self.filtration):
                 for i, j in filtration["lot_info"].keys():
@@ -382,6 +390,7 @@ class StoxOptimizer:
                     lot_cost_basis_price = filtration["lot_info"][i, j][
                         "cost_basis_price"
                     ][s]
+                    # no multiplying for tax rate here because minimization tax cost over 1 tax rate is equivalent to minimization of realized gain/loss
                     lot_tax_cost = (
                         prob
                         * filtration["sell_wt_l"][i, j]
