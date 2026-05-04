@@ -153,9 +153,11 @@ class StoxOptimizer:
             portfolio_ub = self.portfolio_ub[f]
             # upper bound is based on heuristics putting the whole portfolio in 1 lot
             lot_shr_ub = {
-                (i, j): np.ceil(
-                    portfolio_ub
-                    / self.filtration[f]["tkr_prices"][lot_info[i, j]["tkr"]]
+                (i, j): float(
+                    np.ceil(
+                        portfolio_ub
+                        / self.filtration[f]["tkr_prices"][lot_info[i, j]["tkr"]]
+                    )
                 )
                 for i, j in lot_indices
             }
@@ -187,9 +189,11 @@ class StoxOptimizer:
                 for (i, j), info in lot_info.items()
             }
             sell_shr_l_ub = {
-                (i, j): np.ceil(
-                    portfolio_ub
-                    / self.filtration[f]["tkr_prices"][lot_info[i, j]["tkr"]]
+                (i, j): float(
+                    np.ceil(
+                        portfolio_ub
+                        / self.filtration[f]["tkr_prices"][lot_info[i, j]["tkr"]]
+                    )
                 )
                 for i, j in lot_indices
             }
