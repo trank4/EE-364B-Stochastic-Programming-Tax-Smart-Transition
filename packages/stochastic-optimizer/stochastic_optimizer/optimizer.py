@@ -55,8 +55,11 @@ class StoxOptimizer:
     def build(self) -> None:
         """
         Assemble the full Gurobi model by running each build stage in order:
-        filtration variables, starting-lot anchors, wash-sale constraints, and
-        lot dynamics constraints. Must be called before solve().
+        filtration variables, lot/holding linking, starting-lot anchors,
+        wash-sale + self-financing constraints, and lot dynamics constraints,
+        followed by the two hierarchical objectives (terminal deviation, tax
+        cost) registered for lexicographic minimization. Must be called before
+        solve().
         """
         self.build_filtration()
         self.build_lot_holding_linking_constraints()
@@ -383,6 +386,13 @@ class StoxOptimizer:
             )
 
     def build_terminal_deviation_objective(self):
+        """
+        Minimize the total absolute dollar deviation from target weights at
+        the final filtration. For each model ticker k, an auxiliary
+        terminal_dev[k] >= 0 bounds |amount_k - tgt_wt_k * V_T|, encoded by
+        two linear inequalities. The aggregate sum is registered as the
+        priority-1 objective in the lex hierarchy.
+        """
         last_filtration = self.filtration[-1]
         final_portfolio_amount = gp.quicksum(
             last_filtration["shr_h"][tkr] * last_filtration["tkr_prices"][tkr]
@@ -420,16 +430,23 @@ class StoxOptimizer:
             )
 
     def build_tax_cost_objective(self):
-        """we want to minimize the expected tax cost realized from all sells across all filtrations and scenarios.
-        We assume that, the optimizer will take the same action across all scenarios.
-        This assumption simplifies and make the optimization problem more tractable as it is equivalent to using the same variables across all scenarios.
-        Different prices in scenarios will only affect the tax cost objective, and no where else.
-        And if we assume same likelihood for every scenarios, minimizing expected tax cost across scenario is equivalent to minimizing sum of tax cost across scenarios.
-        Assume tax cost is calculated as follow:
-        tax of selling from a lot = $_lot_sell_amount - ($_lot_sell_amount / price) * cost_basis_price
-                                  = $_lot_sell_amount * (1 - cost_basis_price/price)
-        -> (tax / total_aum) = ($_lot_sell_amount / total_aum) * (1 - cost_basis_price/price)
-                             = sell_wt_l * (1 - cost_basis_price/price)
+        """
+        Minimize total realized gain/loss across all sells and filtrations.
+
+        For each lot (i, j) at filtration f, the per-share gain is
+            price[f] - cost_basis_price[i, j]
+        and the realized P&L from selling sell_shr_l[i, j] shares is
+            sell_shr_l[i, j] * (price[f] - cost_basis_price[i, j]).
+
+        The flat tax rate tau is omitted: with a single rate, scaling the
+        objective by tau doesn't change the argmin. Negative contributions
+        (losses) are kept, so the optimizer can harvest them — the objective
+        variable has lb = -inf accordingly.
+
+        When multi-scenario support is added, prices and the inner sum will
+        gain a scenario index s; the outer expectation E_s[tax(s)] reduces to
+        a sum if scenarios are equally likely, and to a probability-weighted
+        sum otherwise (via inputs["scenario_prob"]).
         """
         # create total tax cost objective variable (across all filtrations and all scenarios)
         # the lower bound is -inf to minimize tax cost as much as possible
@@ -456,6 +473,13 @@ class StoxOptimizer:
         )
 
     def set_objective_hierarchy(self):
+        """
+        Register all objective variables in self.objectives with Gurobi's
+        multi-objective interface. setObjectiveN treats higher `priority`
+        values as more important: priority-1 is minimized first, then
+        priority-0 is minimized subject to priority-1 staying optimal
+        (lexicographic minimization).
+        """
         for index, (name, (var, priority)) in enumerate(self.objectives.items()):
             self.model.setObjectiveN(var, index=index, priority=priority, name=name)
         self.model.ModelSense = GRB.MINIMIZE

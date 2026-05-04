@@ -42,17 +42,17 @@ top20_spy_tickers = [
 ]
 
 # ---------------------------------------------------------------------------
-# Step 2: Monthly returns for 2025
+# Step 2: Month-start prices for 2024
 # ---------------------------------------------------------------------------
 
 
 def fetch_monthly_price(tickers: list[str]) -> pd.DataFrame:
     """
-    Download daily adjusted closes, resample to month-start
+    Download daily adjusted closes and take the first observation of each month.
     """
     raw = yf.download(
         tickers,
-        start="2024-01-01",  # need one prior month for the first return
+        start="2024-01-01",
         end="2025-01-01",
         auto_adjust=True,
         progress=False,
@@ -61,7 +61,7 @@ def fetch_monthly_price(tickers: list[str]) -> pd.DataFrame:
     # Align columns to requested tickers (some may have been delisted)
     raw = raw.reindex(columns=tickers)
 
-    # Month-end prices
+    # Month-start prices
     monthly_prices = raw.resample("MS").first()
 
     return monthly_prices
@@ -84,7 +84,7 @@ def run_optimizer(inputs: dict) -> None:
 
 if __name__ == "__main__":
 
-    # Monthly returns
+    # Month-start prices
     monthly_prices = fetch_monthly_price(top20_spy_tickers)
 
     # construct starting position dataframe
