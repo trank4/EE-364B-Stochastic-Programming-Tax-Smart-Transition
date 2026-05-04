@@ -444,8 +444,10 @@ class StoxOptimizer:
                 lot_price = filtration["tkr_prices"][lot_tkr]
                 lot_cost_basis_price = filtration["lot_info"][i, j]["cost_basis_price"]
                 # no multiplying for tax rate here because minimization tax cost over 1 tax rate is equivalent to minimization of realized gain/loss
-                lot_tax_cost = filtration["sell_shr_l"][i, j] * (
-                    lot_price - lot_cost_basis_price
+                lot_tax_cost = (
+                    self.inputs["tax_rate"]
+                    * filtration["sell_shr_l"][i, j]
+                    * (lot_price - lot_cost_basis_price)
                 )
                 lot_tax_cost_list.append(lot_tax_cost)
         self.model.addConstr(
