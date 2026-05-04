@@ -437,7 +437,8 @@ class StoxOptimizer:
         self.objectives["total_tax_cost"] = [total_tax_cost, 0]
         # create list to hold all lot tax cost
         lot_tax_cost_list = []
-        for f, filtration in enumerate(self.filtration):
+        for f in range(len(self.filtration) - 1):
+            filtration = self.filtration[f]
             for i, j in filtration["lot_info"].keys():
                 lot_tkr = filtration["lot_info"][i, j]["tkr"]
                 lot_price = filtration["tkr_prices"][lot_tkr]
