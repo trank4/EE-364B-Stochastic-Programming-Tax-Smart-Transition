@@ -453,4 +453,6 @@ class StoxOptimizer:
         )
 
     def set_objective_hierarchy(self):
-        pass
+        for index, (name, (var, priority)) in enumerate(self.objectives.items()):
+            self.model.setObjectiveN(var, index=index, priority=priority, name=name)
+        self.model.ModelSense = GRB.MINIMIZE
