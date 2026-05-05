@@ -500,7 +500,7 @@ class StoxOptimizer:
         before tax cost minimization.
         """
         model_tkrs = list(self.inputs["model"]["tkr"])
-        tkr_dev = self.inputs["tkr_dev"]
+        tkr_dev = self.inputs["tkr_adev"]
         all_trans_dev_vars = []
 
         for f in range(1, len(self.filtration) - 1):

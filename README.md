@@ -62,17 +62,19 @@ class StoxOptimizer:
 4. `build_wash_sales_constraints` — sell aggregation, big-M indicator linking, no-simultaneous-buy-and-sell, dollar self-financing.
 5. `build_lot_dynamics_constraints` — link consecutive periods via sells (existing lots) and buys (new lots).
 6. `build_terminal_deviation_objective` — total absolute deviation from target weights at the final period.
-7. `build_tax_cost_objective` — total realized gain/loss across all sells (proxy for tax cost).
-8. `set_objective_hierarchy` — register both objectives with `setObjectiveN` for lexicographic minimization.
+7. `build_transitory_deviation_objective` — total deviation outside the `±tkr_dev` band at intermediate periods.
+8. `build_tax_cost_objective` — total realized gain/loss across all sells (proxy for tax cost).
+9. `set_objective_hierarchy` — register all three objectives with `setObjectiveN` for lexicographic minimization.
 
 **`inputs` dict keys:**
 
 | Key | Type | Description |
 |---|---|---|
 | `positions` | `pd.DataFrame` | Starting portfolio (`tkr`, `amt`, `cost_basis_amt`; `pnl`/`wt` optional) |
-| `tax_rate` | `float` | Flat capital gains tax rate (currently unused — see "Modeling Notes") |
+| `tax_rate` | `float` | Flat capital gains tax rate applied to realized gains |
 | `model` | `pd.DataFrame` | Target model portfolio (`tkr`, `tgt_wt`) |
 | `monthly_prices` | `pd.DataFrame` | Month-start prices, rows = periods, columns = tickers |
+| `tkr_dev` | `float` | Allowed weight deviation band (decimal) around target at intermediate filtrations, e.g. `0.05` = ±5% |
 | `scenario_prob` | `list \| None` | Reserved for multi-scenario extension; currently unused |
 
 **Dependencies:** `gurobipy >= 11.0.0`, `numpy`, `pandas`
@@ -110,10 +112,11 @@ At each filtration $f$, the optimizer decides how many shares of each lot to sel
 | $L$ | Number of starting lots (rows of `positions`) |
 | $p_{k,f}$ | Market price of ticker $k$ at filtration $f$ |
 | $w^*_k$ | Target portfolio weight for ticker $k$ |
-| $\tau$ | Flat capital gains tax rate (not currently used in the objective) |
+| $\tau$ | Flat capital gains tax rate (`tax_rate`) |
+| $\delta$ | Per-ticker weight tolerance band (`tkr_dev`); allows weight to deviate $\pm\delta$ from target at intermediate filtrations |
 | $c_{i,j}$ | Per-share cost basis of lot $(i, j)$ |
 
-For starting lots ($j = 0$), $c_{i,0} = \text{cost\_basis\_amt}_i \,/\, (\text{amt}_i / p_{\text{ticker}(i),\,0})$ — i.e. cost basis dollars divided by shares acquired. For purchased lots ($j \ge 1$), $c_{i,j} = p_{\text{ticker}(i),\,j-1}$ since the lot was bought at filtration $j - 1$.
+For starting lots ($j = 0$), $c_{i,0} = \text{cb}_i \,/\, (\text{amt}_i / p_{\text{ticker}(i),\,0})$, where $\text{cb}_i$ and $\text{amt}_i$ are the `cost_basis_amt` and `amt` fields of position $i$. For purchased lots ($j \ge 1$), $c_{i,j} = p_{\text{ticker}(i),\,j-1}$ — the market price when the lot was opened.
 
 ---
 
@@ -121,8 +124,8 @@ For starting lots ($j = 0$), $c_{i,0} = \text{cost\_basis\_amt}_i \,/\, (\text{a
 
 Each lot is identified by $(i, j)$ where $j$ is the period the lot was acquired and $i$ is its row index *within that column*:
 
-- **Column $j = 0$** (starting lots): $i \in \{0, \dots, L - 1\}$, ticker = $\text{pos\_tkrs}[i]$.
-- **Column $j \ge 1$** (purchased lots): $i \in \{0, \dots, N - 1\}$, ticker = $\text{model\_tkrs}[i]$.
+- **Column $j = 0$** (starting lots): $i \in \{0, \dots, L - 1\}$, ticker = $\text{ticker}(i, 0)$ (the $i$-th starting position).
+- **Column $j \ge 1$** (purchased lots): $i \in \{0, \dots, N - 1\}$, ticker = $\text{ticker}(i, j)$ (the $i$-th model asset).
 
 So at filtration $f$ the available lot set is
 
@@ -207,7 +210,7 @@ $$x_{i,j,f+1} = x_{i,j,f} - s^l_{i,j,f}, \qquad (i,j) \in \mathcal{L}_f, \; f < 
 
 New lots at $f+1$ (column $j = f + 1$) are initialized from buys at $f$:
 
-$$x_{i,\,f+1,\,f+1} = b^h_{\text{model\_tkrs}[i],\,f}, \qquad i \in \{0,\dots,N-1\}, \; f < T-1.$$
+$$x_{i,\,f+1,\,f+1} = b^h_{\text{ticker}(i,\,f+1),\,f}, \qquad i \in \{0,\dots,N-1\}, \; f < T-1.$$
 
 The inequality $s^l_{i,j,f} \le x_{i,j,f}$ is enforced *implicitly* by combining the dynamics equation with $x_{i,j,f+1} \ge 0$. (See "Modeling Notes" for the corresponding caveat at $f = T-1$.)
 
@@ -215,7 +218,7 @@ The inequality $s^l_{i,j,f} \le x_{i,j,f}$ is enforced *implicitly* by combining
 
 ### Objectives
 
-The optimizer registers two objectives via Gurobi's hierarchical multi-objective interface (`setObjectiveN`) and minimizes them lexicographically. Higher priority is optimized first; lower priority is minimized subject to the higher priority being optimal.
+The optimizer registers three objectives via Gurobi's hierarchical multi-objective interface (`setObjectiveN`) and minimizes them lexicographically. Higher priority is optimized first; lower priority is minimized subject to the higher priority being optimal. Objectives at the **same** priority are combined with equal weight (Gurobi default).
 
 #### Priority 1 — Terminal weight deviation (`build_terminal_deviation_objective`)
 
@@ -227,13 +230,30 @@ Encoded as two linear inequalities. The objective is
 
 $$\min \sum_{k \in \text{model}} \xi_k.$$
 
+#### Priority 1 — Transitory weight deviation (`build_transitory_deviation_objective`)
+
+At each intermediate filtration $f \in \{1, \dots, T-2\}$ the portfolio is allowed to deviate up to $\pm\delta$ (in weight) from the target. Only the overshoot beyond the band is penalized. Let $V_f = \sum_k p_{k,f}\,h_{k,f}$. For each model ticker $k$, an auxiliary $\zeta_{k,f} \ge 0$ captures the out-of-band dollar deviation:
+
+$$\zeta_{k,f} \ge p_{k,f}\,h_{k,f} - (w^*_k + \delta)\,V_f,$$
+$$\zeta_{k,f} \ge (w^*_k - \delta)\,V_f - p_{k,f}\,h_{k,f}.$$
+
+Within the band both right-hand sides are $\le 0$, so $\zeta_{k,f}$ can stay at 0. The objective is
+
+$$\min \sum_{f=1}^{T-2} \sum_{k \in \text{model}} \zeta_{k,f}.$$
+
+This objective shares priority 1 with terminal deviation, so both are minimized jointly before tax cost.
+
 #### Priority 0 — Realized tax cost (`build_tax_cost_objective`)
 
-Total realized gain/loss across all sells, summed over filtrations:
+Total realized gain/loss across all sells, decomposed per filtration and then summed. For each filtration $f \in \{0,\dots,T-2\}$ a scalar variable $\text{tc}_f$ is defined by
 
-$$\min \sum_f \sum_{(i,j)\in\mathcal{L}_f} s^l_{i,j,f} \cdot \bigl(p_{\text{ticker}(i),f} - c_{i,j}\bigr).$$
+$$\text{tc}_f = \tau \sum_{(i,j)\in\mathcal{L}_f} s^l_{i,j,f} \cdot \bigl(p_{\text{ticker}(i),f} - c_{i,j}\bigr),$$
 
-The flat tax rate $\tau$ is omitted because, with a single rate, scaling by $\tau$ doesn't change the argmin. Losses contribute negatively, so the optimizer is incentivized to harvest them. The objective variable has $\text{lb} = -\infty$.
+and stored in `self.filtration[f]["tax_cost"]` for post-solve inspection. The aggregate objective is
+
+$$\min \sum_f \text{tc}_f.$$
+
+Losses contribute negatively, so the optimizer is incentivized to harvest them. The objective variable has $\text{lb} = -\infty$.
 
 ---
 

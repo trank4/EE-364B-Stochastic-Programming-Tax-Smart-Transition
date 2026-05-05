@@ -112,7 +112,6 @@ if __name__ == "__main__":
         "model": model,
         "tkr_adev": 0.05,
         "monthly_prices": monthly_prices,
-        "scenario_prob": None,  # A list of probabilities for scenarios. None mean equally likely.
     }
     # build and run optimizer
     run_optimizer(inputs)
