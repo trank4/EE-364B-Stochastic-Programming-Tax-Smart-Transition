@@ -72,10 +72,11 @@ def fetch_monthly_price(tickers: list[str]) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def run_optimizer(inputs: dict) -> None:
+def run_optimizer(inputs: dict) -> dict:
     optimizer = StoxOptimizer(inputs)
     optimizer.build()
-    optimizer.solve()
+    sol = optimizer.solve()
+    return sol
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +115,6 @@ if __name__ == "__main__":
         "monthly_prices": monthly_prices,
     }
     # build and run optimizer
-    run_optimizer(inputs)
+    sol = run_optimizer(inputs)
 
     print("\nDone.")

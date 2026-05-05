@@ -73,13 +73,52 @@ class StoxOptimizer:
         self.build_tax_cost_objective()
         self.set_objective_hierarchy()
 
-    def solve(self) -> None:
+    def solve(self) -> dict:
         """
         Hand the assembled model to the Gurobi solver and extract the solution.
         build() must be called first.
+
+        Returns a dict with:
+        - "filtration": list of per-filtration dicts, one per period, each containing
+          the optimal values (.X) of all decision variables at that filtration:
+            lot_shr      — {(i,j): float}  shares held per lot
+            sell_shr_l   — {(i,j): float}  shares sold per lot
+            shr_h        — {tkr: float}    total shares held per ticker
+            sell_shr_h   — {tkr: float}    total shares sold per ticker
+            buy_shr_h    — {tkr: float}    total shares bought per ticker
+            sell_h       — {tkr: float}    sell binary indicator per ticker
+            buy_h        — {tkr: float}    buy binary indicator per ticker
+            tax_cost     — float           realized tax cost (filtrations 0..T-2 only)
+            trans_dev    — {tkr: float}    out-of-band deviation (filtrations 1..T-2 only)
+        - one key per objective name (e.g. "total_terminal_dev", "total_trans_dev",
+          "total_tax_cost") mapping to its optimal scalar value.
         """
         self.model.optimize()
-        # get solutions
+        sol = {}
+
+        sol["filtration"] = []
+        for f, filtration in enumerate(self.filtration):
+            f_sol = {
+                "lot_shr": {k: v.X for k, v in filtration["lot_shr"].items()},
+                "sell_shr_l": {k: v.X for k, v in filtration["sell_shr_l"].items()},
+                "shr_h": {k: v.X for k, v in filtration["shr_h"].items()},
+                "sell_shr_h": {k: v.X for k, v in filtration["sell_shr_h"].items()},
+                "buy_shr_h": {k: v.X for k, v in filtration["buy_shr_h"].items()},
+                "sell_h": {k: v.X for k, v in filtration["sell_h"].items()},
+                "buy_h": {k: v.X for k, v in filtration["buy_h"].items()},
+            }
+            if "tax_cost" in filtration:
+                f_sol["tax_cost"] = filtration["tax_cost"].X
+            if "trans_dev" in filtration:
+                f_sol["trans_dev"] = {
+                    k: v.X for k, v in filtration["trans_dev"].items()
+                }
+            sol["filtration"].append(f_sol)
+
+        for name, (var, _priority) in self.objectives.items():
+            sol[name] = var.X
+
+        return sol
 
     def lot_ticker(self, i, j):
         """
