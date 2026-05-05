@@ -456,23 +456,29 @@ class StoxOptimizer:
         # the lower bound is -inf to minimize tax cost as much as possible
         total_tax_cost = self.model.addVar(lb=-GRB.INFINITY, name="total_tax_cost")
         self.objectives["total_tax_cost"] = [total_tax_cost, 0]
-        # create list to hold all lot tax cost
-        lot_tax_cost_list = []
+        filtration_tax_cost_vars = []
         for f in range(len(self.filtration) - 1):
             filtration = self.filtration[f]
+            lot_tax_cost_list = []
             for i, j in filtration["lot_info"].keys():
                 lot_tkr = filtration["lot_info"][i, j]["tkr"]
                 lot_price = filtration["tkr_prices"][lot_tkr]
                 lot_cost_basis_price = filtration["lot_info"][i, j]["cost_basis_price"]
-                # no multiplying for tax rate here because minimization tax cost over 1 tax rate is equivalent to minimization of realized gain/loss
                 lot_tax_cost = (
                     self.inputs["tax_rate"]
                     * filtration["sell_shr_l"][i, j]
                     * (lot_price - lot_cost_basis_price)
                 )
                 lot_tax_cost_list.append(lot_tax_cost)
+            tax_cost_f = self.model.addVar(lb=-GRB.INFINITY, name=f"tax_cost(f={f})")
+            self.model.addConstr(
+                tax_cost_f == gp.quicksum(lot_tax_cost_list),
+                name=f"tax_cost_def(f={f})",
+            )
+            self.filtration[f]["tax_cost"] = tax_cost_f
+            filtration_tax_cost_vars.append(tax_cost_f)
         self.model.addConstr(
-            gp.quicksum(lot_tax_cost_list) <= total_tax_cost,
+            gp.quicksum(filtration_tax_cost_vars) <= total_tax_cost,
             name="total_tax_cost_objective",
         )
 
