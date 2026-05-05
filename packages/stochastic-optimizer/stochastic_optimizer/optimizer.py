@@ -69,6 +69,7 @@ class StoxOptimizer:
 
         # build hierarchical objectives for lexicographic optimization
         self.build_terminal_deviation_objective()
+        self.build_transitory_deviation_objective()
         self.build_tax_cost_objective()
         self.set_objective_hierarchy()
 
@@ -409,7 +410,7 @@ class StoxOptimizer:
 
         # set up terminal deviation objective variable
         total_terminal_dev = self.model.addVar(name="total_terminal_dev_objective")
-        self.objectives["total_terminal_dev"] = [total_terminal_dev, 1]
+        self.objectives["total_terminal_dev"] = [total_terminal_dev, 2]
         self.model.addConstr(
             total_terminal_dev == gp.quicksum(terminal_dev[tkr] for tkr in model_tkrs),
             name="total_terminal_dev_objective",
@@ -480,6 +481,62 @@ class StoxOptimizer:
         self.model.addConstr(
             gp.quicksum(filtration_tax_cost_vars) <= total_tax_cost,
             name="total_tax_cost_objective",
+        )
+
+    def build_transitory_deviation_objective(self):
+        """
+        Minimize the total dollar deviation outside the ±tkr_dev tolerance band
+        around target weights across intermediate filtrations (f=1 to T-2).
+
+        For each model ticker k at filtration f, trans_dev[f][k] >= 0 captures
+        how far the holding strays outside the band [tgt_wt_k - tkr_dev, tgt_wt_k + tkr_dev],
+        encoded by two linear inequalities in dollar space:
+            tkr_amount_k - (tgt_wt_k + tkr_dev) * V_f <= trans_dev[f][k]
+            (tgt_wt_k - tkr_dev) * V_f - tkr_amount_k <= trans_dev[f][k]
+        Within the band both RHS's are <= 0 so trans_dev[f][k] can stay at 0.
+
+        The aggregate sum is registered as priority-1 (same lex level as terminal
+        deviation) so intermediate alignment is optimized alongside terminal alignment
+        before tax cost minimization.
+        """
+        model_tkrs = list(self.inputs["model"]["tkr"])
+        tkr_dev = self.inputs["tkr_dev"]
+        all_trans_dev_vars = []
+
+        for f in range(1, len(self.filtration) - 1):
+            filtration = self.filtration[f]
+            portfolio_amount_f = gp.quicksum(
+                filtration["shr_h"][tkr] * filtration["tkr_prices"][tkr]
+                for tkr in filtration["shr_h"]
+            )
+            trans_dev_names = {tkr: f"trans_dev({tkr},f={f})" for tkr in model_tkrs}
+            trans_dev = self.model.addVars(model_tkrs, lb=0, name=trans_dev_names)
+            self.filtration[f]["trans_dev"] = trans_dev
+
+            for tkr in model_tkrs:
+                tkr_tgt_wt = (
+                    self.inputs["model"]
+                    .loc[self.inputs["model"]["tkr"] == tkr, "tgt_wt"]
+                    .item()
+                )
+                tkr_amount = filtration["shr_h"][tkr] * filtration["tkr_prices"][tkr]
+                self.model.addConstr(
+                    tkr_amount - (tkr_tgt_wt + tkr_dev) * portfolio_amount_f
+                    <= trans_dev[tkr],
+                    name=f"upper_bound_trans_dev({tkr},f={f})",
+                )
+                self.model.addConstr(
+                    (tkr_tgt_wt - tkr_dev) * portfolio_amount_f - tkr_amount
+                    <= trans_dev[tkr],
+                    name=f"lower_bound_trans_dev({tkr},f={f})",
+                )
+                all_trans_dev_vars.append(trans_dev[tkr])
+
+        total_trans_dev = self.model.addVar(lb=0, name="total_trans_dev_objective")
+        self.objectives["total_trans_dev"] = [total_trans_dev, 1]
+        self.model.addConstr(
+            total_trans_dev == gp.quicksum(all_trans_dev_vars),
+            name="total_trans_dev_objective",
         )
 
     def set_objective_hierarchy(self):

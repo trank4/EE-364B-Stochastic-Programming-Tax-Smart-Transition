@@ -110,6 +110,7 @@ if __name__ == "__main__":
         "positions": positions,
         "tax_rate": tax_rate,
         "model": model,
+        "tkr_adev": 0.05,
         "monthly_prices": monthly_prices,
         "scenario_prob": None,  # A list of probabilities for scenarios. None mean equally likely.
     }
