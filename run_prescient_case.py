@@ -154,6 +154,74 @@ def plot_transition_pct(transition_pct: pd.Series) -> None:
     plt.show()
 
 
+def plot_portfolio_value(sol: dict, monthly_prices: pd.DataFrame) -> None:
+    """
+    Plot total portfolio value in dollars at each filtration period.
+    Saves the figure to portfolio_value.png.
+    """
+    dates = monthly_prices.index
+    total_values = []
+    for f, f_sol in enumerate(sol["filtration"]):
+        prices = monthly_prices.iloc[f]
+        total_val = sum(
+            f_sol["shr_h"].get(tkr, 0.0) * prices[tkr] for tkr in monthly_prices.columns
+        )
+        total_values.append(total_val)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(dates, total_values, marker="o")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Portfolio Value ($)")
+    ax.set_title("Total Portfolio Value Over Transition")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"${y:,.0f}"))
+    ax.xaxis.set_tick_params(rotation=45)
+    fig.tight_layout()
+    plt.savefig("portfolio_value.png", dpi=150)
+    plt.show()
+
+
+def plot_ticker_weight_and_price(
+    weights_df: pd.DataFrame, monthly_prices: pd.DataFrame, tkr: str
+) -> None:
+    """
+    Plot portfolio weight and market price of a single ticker over time on dual axes.
+    Saves the figure to <tkr>_weight_and_price.png.
+    """
+    dates = weights_df.index
+    weights = weights_df[tkr]
+    prices = monthly_prices[tkr]
+
+    fig, ax1 = plt.subplots(figsize=(10, 4))
+
+    ax1.plot(dates, weights, marker="o", color="steelblue", label=f"{tkr} weight")
+    ax1.set_xlabel("Date")
+    ax1.set_ylabel("Portfolio Weight", color="steelblue")
+    ax1.tick_params(axis="y", labelcolor="steelblue")
+    ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
+    ax1.xaxis.set_tick_params(rotation=45)
+
+    ax2 = ax1.twinx()
+    ax2.plot(
+        dates,
+        prices,
+        marker="s",
+        color="darkorange",
+        linestyle="--",
+        label=f"{tkr} price",
+    )
+    ax2.set_ylabel("Price ($)", color="darkorange")
+    ax2.tick_params(axis="y", labelcolor="darkorange")
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
+
+    fig.suptitle(f"{tkr} Weight and Price Over Transition")
+    fig.tight_layout()
+    plt.savefig(f"{tkr}_weight_and_price.png", dpi=150)
+    plt.show()
+
+
 def calculate_transition_pct(
     weights_df: pd.DataFrame, model: pd.DataFrame
 ) -> pd.Series:
@@ -218,10 +286,12 @@ if __name__ == "__main__":
     sol = run_optimizer(inputs)
 
     plot_cumulative_tax_cost(sol, monthly_prices)
+    plot_portfolio_value(sol, monthly_prices)
 
     weights_df = calculate_portfolio_weights(sol, monthly_prices)
     transition_pct = calculate_transition_pct(weights_df, model)
     plot_transition_pct(transition_pct)
+    plot_ticker_weight_and_price(weights_df, monthly_prices, "AAPL")
     print("\nPortfolio weights over time:")
     print(weights_df.to_string())
     print("\n% Transition over time:")
