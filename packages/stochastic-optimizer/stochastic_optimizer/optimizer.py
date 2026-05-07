@@ -100,13 +100,21 @@ class StoxOptimizer:
         for f, filtration in enumerate(self.filtration):
             f_sol = {
                 "lot_shr": {k: v.X for k, v in filtration["lot_shr"].items()},
-                "sell_shr_l": {k: v.X for k, v in filtration["sell_shr_l"].items()},
                 "shr_h": {k: v.X for k, v in filtration["shr_h"].items()},
-                "sell_shr_h": {k: v.X for k, v in filtration["sell_shr_h"].items()},
-                "buy_shr_h": {k: v.X for k, v in filtration["buy_shr_h"].items()},
-                "sell_h": {k: v.X for k, v in filtration["sell_h"].items()},
-                "buy_h": {k: v.X for k, v in filtration["buy_h"].items()},
             }
+            # sell/buy variables are absent at the terminal filtration
+            if f < self.T - 1:
+                f_sol["sell_shr_l"] = {
+                    k: v.X for k, v in filtration["sell_shr_l"].items()
+                }
+                f_sol["sell_shr_h"] = {
+                    k: v.X for k, v in filtration["sell_shr_h"].items()
+                }
+                f_sol["buy_shr_h"] = {
+                    k: v.X for k, v in filtration["buy_shr_h"].items()
+                }
+                f_sol["sell_h"] = {k: v.X for k, v in filtration["sell_h"].items()}
+                f_sol["buy_h"] = {k: v.X for k, v in filtration["buy_h"].items()}
             if "tax_cost" in filtration:
                 f_sol["tax_cost"] = filtration["tax_cost"].X
             if "trans_dev" in filtration:
@@ -222,63 +230,64 @@ class StoxOptimizer:
             self.filtration[f]["shr_h"] = self.model.addVars(
                 tkr_to_lot_indices.keys(), lb=0.0, ub=shr_h_ub, name=shr_h_names
             )
-            # set up sell_shr_l
-            # sell_shr_l has the same indices as lots, because we can decide selling these lots to reach next filtration
-            sell_shr_l_names = {
-                (i, j): f"sell_shr_l({info['tkr']},l={i},t={j},f={f})"
-                for (i, j), info in lot_info.items()
-            }
-            sell_shr_l_ub = {
-                (i, j): float(
-                    np.ceil(
-                        portfolio_ub
-                        / self.filtration[f]["tkr_prices"][lot_info[i, j]["tkr"]]
+            # sell/buy variables only exist for non-terminal filtrations: selling at T-1
+            # has no effect on shr_h[T-1] (used by terminal deviation) and is never
+            # linked forward by lot dynamics, so these variables would be unconstrained.
+            if f < self.T - 1:
+                sell_shr_l_names = {
+                    (i, j): f"sell_shr_l({info['tkr']},l={i},t={j},f={f})"
+                    for (i, j), info in lot_info.items()
+                }
+                sell_shr_l_ub = {
+                    (i, j): float(
+                        np.ceil(
+                            portfolio_ub
+                            / self.filtration[f]["tkr_prices"][lot_info[i, j]["tkr"]]
+                        )
                     )
+                    for i, j in lot_indices
+                }
+                self.filtration[f]["sell_shr_l"] = self.model.addVars(
+                    lot_indices, lb=0.0, ub=sell_shr_l_ub, name=sell_shr_l_names
                 )
-                for i, j in lot_indices
-            }
-            self.filtration[f]["sell_shr_l"] = self.model.addVars(
-                lot_indices, lb=0.0, ub=sell_shr_l_ub, name=sell_shr_l_names
-            )
 
-            # set up sell_shr_h
-            all_tkrs_to_sell = list(tkr_to_lot_indices.keys())
-            self.filtration[f]["all_tkrs_to_sell"] = all_tkrs_to_sell
-            sell_shr_h_names = {
-                tkr: f"sell_shr_h({tkr}, f={f})" for tkr in all_tkrs_to_sell
-            }
-            sell_shr_h_ub = {
-                tkr: np.ceil(portfolio_ub / self.filtration[f]["tkr_prices"][tkr])
-                for tkr in all_tkrs_to_sell
-            }
-            self.filtration[f]["sell_shr_h"] = self.model.addVars(
-                all_tkrs_to_sell, lb=0.0, ub=sell_shr_h_ub, name=sell_shr_h_names
-            )
+                all_tkrs_to_sell = list(tkr_to_lot_indices.keys())
+                self.filtration[f]["all_tkrs_to_sell"] = all_tkrs_to_sell
+                sell_shr_h_names = {
+                    tkr: f"sell_shr_h({tkr}, f={f})" for tkr in all_tkrs_to_sell
+                }
+                sell_shr_h_ub = {
+                    tkr: np.ceil(portfolio_ub / self.filtration[f]["tkr_prices"][tkr])
+                    for tkr in all_tkrs_to_sell
+                }
+                self.filtration[f]["sell_shr_h"] = self.model.addVars(
+                    all_tkrs_to_sell, lb=0.0, ub=sell_shr_h_ub, name=sell_shr_h_names
+                )
 
-            # set up buy_shr_h
-            all_tkrs_to_buy = list(self.inputs["model"]["tkr"])
-            self.filtration[f]["all_tkrs_to_buy"] = all_tkrs_to_buy
-            buy_shr_h_names = {
-                tkr: f"buy_shr_h({tkr}, f={f})" for tkr in all_tkrs_to_buy
-            }
-            buy_shr_h_ub = {
-                tkr: np.ceil(portfolio_ub / self.filtration[f]["tkr_prices"][tkr])
-                for tkr in all_tkrs_to_buy
-            }
-            self.filtration[f]["buy_shr_h"] = self.model.addVars(
-                all_tkrs_to_buy, lb=0.0, ub=buy_shr_h_ub, name=buy_shr_h_names
-            )
+                all_tkrs_to_buy = list(self.inputs["model"]["tkr"])
+                self.filtration[f]["all_tkrs_to_buy"] = all_tkrs_to_buy
+                buy_shr_h_names = {
+                    tkr: f"buy_shr_h({tkr}, f={f})" for tkr in all_tkrs_to_buy
+                }
+                buy_shr_h_ub = {
+                    tkr: np.ceil(portfolio_ub / self.filtration[f]["tkr_prices"][tkr])
+                    for tkr in all_tkrs_to_buy
+                }
+                self.filtration[f]["buy_shr_h"] = self.model.addVars(
+                    all_tkrs_to_buy, lb=0.0, ub=buy_shr_h_ub, name=buy_shr_h_names
+                )
 
-            # set up buy_h
-            buy_h_names = {tkr: f"buy_h({tkr}, f={f})" for tkr in all_tkrs_to_buy}
-            self.filtration[f]["buy_h"] = self.model.addVars(
-                all_tkrs_to_buy, vtype=GRB.BINARY, name=buy_h_names
-            )
-            # set up sell_h
-            sell_h_names = {tkr: f"sell_h({tkr}, f={f})" for tkr in all_tkrs_to_sell}
-            self.filtration[f]["sell_h"] = self.model.addVars(
-                all_tkrs_to_sell, vtype=GRB.BINARY, name=sell_h_names
-            )
+                buy_h_names = {tkr: f"buy_h({tkr}, f={f})" for tkr in all_tkrs_to_buy}
+                self.filtration[f]["buy_h"] = self.model.addVars(
+                    all_tkrs_to_buy, vtype=GRB.BINARY, name=buy_h_names
+                )
+
+                sell_h_names = {
+                    tkr: f"sell_h({tkr}, f={f})" for tkr in all_tkrs_to_sell
+                }
+                self.filtration[f]["sell_h"] = self.model.addVars(
+                    all_tkrs_to_sell, vtype=GRB.BINARY, name=sell_h_names
+                )
 
             self.filtration[f]["lot_info"] = lot_info
 
@@ -315,7 +324,7 @@ class StoxOptimizer:
         3. Wash-sale prevention — for tickers that appear in both the sell and buy
            universes, buy_h + sell_h <= 1 prevents simultaneous buy and sell.
         """
-        for f, filtration in enumerate(self.filtration):
+        for f, filtration in enumerate(self.filtration[:-1]):
             tkr_to_lot_indices = filtration["tkr_to_lot_indices"]
 
             for tkr in self.filtration[f]["all_tkrs_to_sell"]:
