@@ -20,15 +20,18 @@ class StoxOptimizer:
         self.inputs = inputs
 
         # infer number of period T from inputs
-        self.T = self.inputs["monthly_prices"].shape[0]
-
+        # monthly_prices can be list of prices for multiple scenarios, but they should have same number of periods
+        self.T = self.inputs["monthly_prices"][0].shape[0]
+        self.n_scenario = len(self.inputs["monthly_prices"])
         # infer number of assets in the universe
         self.n_asset = self.inputs["model"].shape[0]
 
         # infer number of starting positions
         self.n_start_pos = self.inputs["positions"].shape[0]
         # create filtration
-        self.filtration = [{} for _ in range(self.T)]
+        self.filtration = {
+            (f, s): {} for f in range(self.T) for s in range(self.n_scenario)
+        }
 
         self.n_lot = None  # total lots in optimization, populated later
 
@@ -36,21 +39,22 @@ class StoxOptimizer:
 
         # deduce the upperbound on portfolio value over periods to deduce upper bounds for variables later
         # the heuristics is to assume the portfolio is growing at highest returns from prices
-        monthly_growth = (
-            (self.inputs["monthly_prices"] / self.inputs["monthly_prices"].shift(1))
-            .dropna()
-            .values
-        )
-
-        max_growth = np.max(monthly_growth, axis=1)
-
+        # portfolio_ub shape: (n_scenario, T) — row s is the per-period UB for scenario s
         starting_value = self.inputs["positions"]["amt"].sum()
 
-        self.portfolio_ub = np.concatenate(
-            ([starting_value], starting_value * np.cumprod(max_growth))
-        )
+        ub_rows = []
+        for prices in self.inputs["monthly_prices"]:
+            monthly_growth = (prices / prices.shift(1)).dropna().values
+            max_growth = np.max(monthly_growth, axis=1)
+            ub_rows.append(
+                np.concatenate(
+                    ([starting_value], starting_value * np.cumprod(max_growth))
+                )
+            )
 
-        assert self.portfolio_ub.shape[0] == self.T
+        self.portfolio_ub = np.stack(ub_rows)  # (n_scenario, T)
+
+        assert self.portfolio_ub.shape == (self.n_scenario, self.T)
 
     def build(self) -> None:
         """
