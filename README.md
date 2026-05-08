@@ -76,7 +76,7 @@ class StoxOptimizer:
 3. `build_starting_lot_constraints` — anchor lot shares at $f=0$ to the input portfolio in every scenario.
 4. `build_wash_sales_constraints` — sell aggregation, big-M indicator linking, buy/sell exclusivity, dollar self-financing (per scenario, $f<T-1$).
 5. `build_lot_dynamics_constraints` — link consecutive periods within each scenario via sells (existing lots) and buys (new lots).
-6. `build_information_pattern_constraints` — non-anticipativity at $f=1$: $\text{lot\_shr}[(s, 1)]$ must be identical across scenarios, which forces the first-period sells/buys to be identical across scenarios.
+6. `build_information_pattern_constraints` — non-anticipativity at $f=1$: `lot_shr[(s, 1)]` must be identical across scenarios, which forces the first-period sells/buys to be identical across scenarios.
 7. `build_terminal_deviation_objective` — average across scenarios of total absolute deviation from target weights at the final period.
 8. `build_transitory_deviation_objective` — average across scenarios of total deviation outside the `±tkr_adev` band at intermediate periods.
 9. `build_tax_cost_objective` — average across scenarios of total realized gain/loss; per-(s, f) `tax_cost_f` variables are reserved for downstream plotting.
@@ -170,7 +170,7 @@ class Backtester:
     def run(self) -> list[dict]: ...
 ```
 
-`run()` loops $t = 0, \dots, |\text{actual\_prices}| - 2$ and returns a list of per-step dicts:
+`run()` loops $t = 0, \dots, T_{\text{actual}} - 2$ where $T_{\text{actual}}$ is the number of rows in `actual_prices`, and returns a list of per-step dicts:
 
 | Key | Description |
 |---|---|
@@ -215,7 +215,7 @@ At each filtration $f$, the optimizer decides how many shares of each lot to sel
 | $N$ | Number of assets in the model universe |
 | $L$ | Number of starting lots (rows of `positions`) |
 | $p_{k,f}$ | Market price of ticker $k$ at filtration $f$ |
-| $w^*_k$ | Target portfolio weight for ticker $k$ |
+| $w^{*}_{k}$ | Target portfolio weight for ticker $k$ |
 | $\tau$ | Flat capital gains tax rate (`tax_rate`) |
 | $\delta$ | Per-ticker weight tolerance band (`tkr_dev`); allows weight to deviate $\pm\delta$ from target at intermediate filtrations |
 | $c_{i,j}$ | Per-share cost basis of lot $(i, j)$ |
@@ -233,7 +233,7 @@ Each lot is identified by $(i, j)$ where $j$ is the period the lot was acquired 
 
 So at filtration $f$ the available lot set is
 
-$$\mathcal{L}_f = \bigl\{(i, 0) : i \in \{0,\dots,L-1\}\bigr\} \;\cup\; \bigcup_{j=1}^{f}\bigl\{(i, j) : i \in \{0,\dots,N-1\}\bigr\},$$
+$$\mathcal{L}_f = \{(i, 0) : i \in \{0,\dots,L-1\}\} \;\cup\; \bigcup_{j=1}^{f}\{(i, j) : i \in \{0,\dots,N-1\}\},$$
 
 with $|\mathcal{L}_f| = L + fN$. The total number of lot variables created over all filtrations is
 
@@ -254,17 +254,17 @@ $$\bar{V}_f = V_0 \cdot \prod_{t=1}^{f} \max_k \frac{p_{k,t}}{p_{k,t-1}}, \quad 
 | Variable | Bounds | Description |
 |---|---|---|
 | $x_{i,j,f} \in \mathbb{R}_+$ | $[0,\, \bar{V}_f / p_{\text{ticker}(i),f}]$ | Shares of lot $(i,j)$ held at filtration $f$ (`lot_shr`) |
-| $s^l_{i,j,f} \in \mathbb{R}_+$ | $[0,\, \bar{V}_f / p_{\text{ticker}(i),f}]$ | Shares sold from lot $(i,j)$ at filtration $f$ (`sell_shr_l`) |
+| $s^{l}_{i,j,f} \in \mathbb{R}_+$ | $[0,\, \bar{V}_f / p_{\text{ticker}(i),f}]$ | Shares sold from lot $(i,j)$ at filtration $f$ (`sell_shr_l`) |
 
 #### Holding-level variables — indexed over ticker $k$ at filtration $f$
 
 | Variable | Bounds | Description |
 |---|---|---|
 | $h_{k,f} \in \mathbb{R}_+$ | $[0,\, \bar{V}_f / p_{k,f}]$ | Total shares of ticker $k$ held (`shr_h`) |
-| $s^h_{k,f} \in \mathbb{R}_+$ | $[0,\, \bar{V}_f / p_{k,f}]$ | Total shares of ticker $k$ sold (`sell_shr_h`) |
-| $b^h_{k,f} \in \mathbb{R}_+$ | $[0,\, \bar{V}_f / p_{k,f}]$ | Total shares of ticker $k$ bought (`buy_shr_h`) |
-| $\delta^s_{k,f} \in \{0,1\}$ | binary | 1 iff ticker $k$ has any sell at filtration $f$ (`sell_h`) |
-| $\delta^b_{k,f} \in \{0,1\}$ | binary | 1 iff ticker $k$ has any buy at filtration $f$ (`buy_h`) |
+| $s^{h}_{k,f} \in \mathbb{R}_+$ | $[0,\, \bar{V}_f / p_{k,f}]$ | Total shares of ticker $k$ sold (`sell_shr_h`) |
+| $b^{h}_{k,f} \in \mathbb{R}_+$ | $[0,\, \bar{V}_f / p_{k,f}]$ | Total shares of ticker $k$ bought (`buy_shr_h`) |
+| $\delta^{s}_{k,f} \in \{0,1\}$ | binary | 1 iff ticker $k$ has any sell at filtration $f$ (`sell_h`) |
+| $\delta^{b}_{k,f} \in \{0,1\}$ | binary | 1 iff ticker $k$ has any buy at filtration $f$ (`buy_h`) |
 
 ---
 
@@ -286,37 +286,37 @@ $$h_{k,f} = \sum_{(i,j)\,\in\,\mathcal{L}_f(k)} x_{i,j,f} \qquad \forall\, k,\, 
 
 Holding-level sells aggregate lot-level sells:
 
-$$s^h_{k,f} = \sum_{(i,j)\,\in\,\mathcal{L}_f(k)} s^l_{i,j,f} \qquad \forall\, k,\, f.$$
+$$s^{h}_{k,f} = \sum_{(i,j)\,\in\,\mathcal{L}_f(k)} s^{l}_{i,j,f} \qquad \forall\, k,\, f.$$
 
 #### Big-M indicator linking
 
 Binary indicators activate only when the corresponding share quantity is nonzero. The big-M used is the variable's own upper bound $M_{k,f} = \lceil \bar{V}_f / p_{k,f} \rceil$:
 
-$$s^h_{k,f} \le M_{k,f}\, \delta^s_{k,f}, \qquad b^h_{k,f} \le M_{k,f}\, \delta^b_{k,f}.$$
+$$s^{h}_{k,f} \le M_{k,f}\, \delta^{s}_{k,f}, \qquad b^{h}_{k,f} \le M_{k,f}\, \delta^{b}_{k,f}.$$
 
 #### No simultaneous buy and sell
 
 For tickers that appear in both the sell and buy universes:
 
-$$\delta^b_{k,f} + \delta^s_{k,f} \le 1.$$
+$$\delta^{b}_{k,f} + \delta^{s}_{k,f} \le 1.$$
 
 #### Self-financing (per period)
 
 Dollars sold equal dollars bought within each filtration — the portfolio holds no cash:
 
-$$\sum_k p_{k,f}\, s^h_{k,f} \;=\; \sum_k p_{k,f}\, b^h_{k,f} \qquad \forall\, f.$$
+$$\sum_k p_{k,f}\, s^{h}_{k,f} \;=\; \sum_k p_{k,f}\, b^{h}_{k,f} \qquad \forall\, f.$$
 
 #### Lot dynamics (`build_lot_dynamics_constraints`)
 
 Existing lots at $f$ propagate to $f+1$ by subtracting sells:
 
-$$x_{i,j,f+1} = x_{i,j,f} - s^l_{i,j,f}, \qquad (i,j) \in \mathcal{L}_f, \; f < T-1.$$
+$$x_{i,j,f+1} = x_{i,j,f} - s^{l}_{i,j,f}, \qquad (i,j) \in \mathcal{L}_f, \; f < T-1.$$
 
 New lots at $f+1$ (column $j = f + 1$) are initialized from buys at $f$:
 
-$$x_{i,\,f+1,\,f+1} = b^h_{\text{ticker}(i,\,f+1),\,f}, \qquad i \in \{0,\dots,N-1\}, \; f < T-1.$$
+$$x_{i,\,f+1,\,f+1} = b^{h}_{\text{ticker}(i,\,f+1),\,f}, \qquad i \in \{0,\dots,N-1\}, \; f < T-1.$$
 
-The inequality $s^l_{i,j,f} \le x_{i,j,f}$ is enforced *implicitly* by combining the dynamics equation with $x_{i,j,f+1} \ge 0$. (See "Modeling Notes" for the corresponding caveat at $f = T-1$.)
+The inequality $s^{l}_{i,j,f} \le x_{i,j,f}$ is enforced *implicitly* by combining the dynamics equation with $x_{i,j,f+1} \ge 0$. (See "Modeling Notes" for the corresponding caveat at $f = T-1$.)
 
 ---
 
@@ -328,7 +328,7 @@ The optimizer registers three objectives via Gurobi's hierarchical multi-objecti
 
 Let $V_T = \sum_k p_{k,T-1}\, h_{k,T-1}$ be the final portfolio value. For each model ticker $k$, an auxiliary $\xi_k \ge 0$ bounds the absolute deviation:
 
-$$\xi_k \ge \big| p_{k,T-1}\,h_{k,T-1} - w^*_k\, V_T \big|.$$
+$$\xi_k \ge \lvert p_{k,T-1}\,h_{k,T-1} - w^{*}_{k}\, V_T \rvert.$$
 
 Encoded as two linear inequalities. The objective is
 
@@ -338,8 +338,8 @@ $$\min \sum_{k \in \text{model}} \xi_k.$$
 
 At each intermediate filtration $f \in \{1, \dots, T-2\}$ the portfolio is allowed to deviate up to $\pm\delta$ (in weight) from the target. Only the overshoot beyond the band is penalized. Let $V_f = \sum_k p_{k,f}\,h_{k,f}$. For each model ticker $k$, an auxiliary $\zeta_{k,f} \ge 0$ captures the out-of-band dollar deviation:
 
-$$\zeta_{k,f} \ge p_{k,f}\,h_{k,f} - (w^*_k + \delta)\,V_f,$$
-$$\zeta_{k,f} \ge (w^*_k - \delta)\,V_f - p_{k,f}\,h_{k,f}.$$
+$$\zeta_{k,f} \ge p_{k,f}\,h_{k,f} - (w^{*}_{k} + \delta)\,V_f,$$
+$$\zeta_{k,f} \ge (w^{*}_{k} - \delta)\,V_f - p_{k,f}\,h_{k,f}.$$
 
 Within the band both right-hand sides are $\le 0$, so $\zeta_{k,f}$ can stay at 0. The objective is
 
@@ -351,7 +351,7 @@ This objective shares priority 1 with terminal deviation, so both are minimized 
 
 Total realized gain/loss across all sells, decomposed per filtration and then summed. For each filtration $f \in \{0,\dots,T-2\}$ a scalar variable $\text{tc}_f$ is defined by
 
-$$\text{tc}_f = \tau \sum_{(i,j)\in\mathcal{L}_f} s^l_{i,j,f} \cdot \bigl(p_{\text{ticker}(i),f} - c_{i,j}\bigr),$$
+$$\text{tc}_f = \tau \sum_{(i,j)\in\mathcal{L}_f} s^{l}_{i,j,f} \cdot (p_{\text{ticker}(i),f} - c_{i,j}),$$
 
 and stored in `self.filtration[f]["tax_cost"]` for post-solve inspection. The aggregate objective is
 
