@@ -1,6 +1,5 @@
-import pandas as pd
-from stochastic_optimizer import RMPController
 from stochastic_optimizer.analysis_utils import *
+from stochastic_optimizer.RMPController import run_RMPController
 
 top20_spy_tickers = [
     "AAPL",
@@ -25,14 +24,6 @@ top20_spy_tickers = [
     "KO",
 ]
 
-
-def run_RMPController(inputs: dict) -> dict:
-    controller = RMPController(inputs)
-    controller.build_price_scenarios()
-    sol = controller.execute()
-    return sol
-
-
 if __name__ == "__main__":
     monthly_prices = fetch_monthly_price(
         top20_spy_tickers, start_date="2024-01-01", end_date="2025-01-01"
@@ -56,6 +47,7 @@ if __name__ == "__main__":
     )
 
     inputs = {
+        "seed": 0,
         "start_date": pd.to_datetime("2024-01-01"),
         "sim_start_date": pd.to_datetime("2023-01-01"),
         "sim_end_date": pd.to_datetime("2024-01-01"),
@@ -65,6 +57,7 @@ if __name__ == "__main__":
         "tax_rate": tax_rate,
         "model": model,
         "positions": positions,
+        "tkr_adev": 0.05,
     }
 
     sol = run_RMPController(inputs)

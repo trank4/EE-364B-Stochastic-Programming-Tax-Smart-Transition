@@ -11,8 +11,8 @@ price path for 2024, serving as an upper-bound benchmark against which
 stochastic (multi-scenario) solutions are compared.
 """
 
-from stochastic_optimizer import StoxOptimizer
 from stochastic_optimizer.analysis_utils import *
+from stochastic_optimizer.optimizer import run_optimizer
 
 top20_spy_tickers = [
     "AAPL",
@@ -36,14 +36,6 @@ top20_spy_tickers = [
     "HD",
     "KO",
 ]
-
-
-def run_optimizer(inputs: dict) -> dict:
-    optimizer = StoxOptimizer(inputs)
-    optimizer.build()
-    sol = optimizer.solve()
-    return sol
-
 
 # ---------------------------------------------------------------------------
 # Entry point

@@ -5,6 +5,13 @@ import numpy as np
 from gurobipy import GRB
 
 
+def run_optimizer(inputs: dict) -> dict:
+    optimizer = StoxOptimizer(inputs)
+    optimizer.build()
+    sol = optimizer.solve()
+    return sol
+
+
 class StoxOptimizer:
     """
     Stochastic portfolio transition optimizer backed by Gurobi.

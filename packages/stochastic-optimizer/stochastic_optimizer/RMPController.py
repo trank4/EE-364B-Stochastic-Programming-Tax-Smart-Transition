@@ -2,19 +2,31 @@ import math
 
 import numpy as np
 import pandas as pd
-from stochastic_optimizer import StoxOptimizer
 from stochastic_optimizer.analysis_utils import fetch_monthly_price
+from stochastic_optimizer.optimizer import run_optimizer
+
+
+def run_RMPController(inputs: dict) -> dict:
+    """Run a single stochastic-optimizer solve over bootstrapped scenarios."""
+    controller = RMPController(inputs)
+    controller.build_price_scenarios()
+    return controller.solve()
 
 
 class RMPController:
     """
-    Robust Model Predictive Controller to generate historical simulation and run stochastic optimizer for transition
+    Robust MPC controller. Single responsibility:
+      1. Generate price scenarios via block bootstrap from a historical window.
+      2. Construct a StoxOptimizer with those scenarios + the input positions.
+      3. Run a single solve and return the solution dict.
+
+    Rolling forward in time with realized prices is delegated to Backtester.
     """
 
     def __init__(self, inputs: dict):
         self.inputs = inputs
-        self.optimizers = []
-        self.scenario_prices = []
+        self.scenario_prices: list[pd.DataFrame] = []
+        self.optimizer: StoxOptimizer | None = None
 
         # all tickers
         self.all_tkrs = list(
@@ -22,18 +34,22 @@ class RMPController:
         )
         self.n_period = self.inputs["n_period"]
         self.n_scenario = self.inputs["n_scenario"]
+        self.seed = self.inputs.get("seed", 42)
 
     def build_price_scenarios(self):
         """
-        Run simulation to set up price scenarios and build optimizer.
+        Block-bootstrap n_scenario price paths of length n_period from a
+        historical return window. The first period of each scenario is anchored
+        at the actual price observed on inputs["start_date"].
 
         Expected inputs keys beyond the standard StoxOptimizer inputs:
-          start_date     — date of the actual portfolio (ISO string, e.g. "2024-01-01")
+          start_date     — date of the actual portfolio (ISO string or Timestamp)
           sim_start_date — start of historical window used for block bootstrap
-          sim_end_date   — end of historical window used for block bootstrap
+          sim_end_date   — end of historical window
           n_scenario     — number of price scenarios to generate
-          n_period       — prediction horizon (number of monthly periods per scenario)
-          seed           — (optional) RNG seed for reproducibility, default 42
+          n_period       — prediction horizon (monthly periods per scenario)
+          block_length   — bootstrap block length in months
+          seed           — (optional) RNG seed, default 42
         """
         # --- get the price on start date ---
         start_date = self.inputs["start_date"]
@@ -61,26 +77,26 @@ class RMPController:
             historical_prices.pct_change().dropna().values
         )  # (n_hist, n_tkr)
 
-        # build overlapping blocks of length _BLOCK_LEN from historical returns
-        _BLOCK_LEN = self.inputs["block_length"]
-        # blocks_arr shape: (n_blocks, _BLOCK_LEN, n_tkr)
+        # build overlapping blocks of length block_length from historical returns
+        block_length = self.inputs["block_length"]
+        # blocks_arr shape: (n_blocks, block_length, n_tkr)
         n_hist = len(monthly_returns)
         blocks_arr = np.stack(
             [
-                monthly_returns[i : i + _BLOCK_LEN]
-                for i in range(n_hist - _BLOCK_LEN + 1)
+                monthly_returns[i : i + block_length]
+                for i in range(n_hist - block_length + 1)
             ]
         )
 
         # run block bootstrapping for self.n_scenario scenarios
         # each scenario needs n_period-1 return periods (period 0 is the known starting price)
-        n_blocks_needed = math.ceil((self.n_period - 1) / _BLOCK_LEN)
-        rng = np.random.default_rng(seed=self.inputs.get("seed", 42))
+        n_blocks_needed = math.ceil((self.n_period - 1) / block_length)
+        rng = np.random.default_rng(seed=self.seed)
 
         self.scenario_prices = []
         for _ in range(self.n_scenario):
             sampled_idx = rng.integers(0, len(blocks_arr), size=n_blocks_needed)
-            # fancy-index blocks, flatten to (n_blocks_needed * _BLOCK_LEN, n_tkr), trim
+            # fancy-index blocks, flatten to (n_blocks_needed * block_length, n_tkr), trim
             sampled_returns = blocks_arr[sampled_idx].reshape(
                 -1, monthly_returns.shape[1]
             )[
@@ -97,11 +113,17 @@ class RMPController:
                 pd.DataFrame(price_matrix, columns=self.all_tkrs)
             )
 
-    def execute(self) -> dict:
+    def solve(self) -> dict:
         """
-        solve each step forward by running the stochastic optimizer
+        Build a single StoxOptimizer with the bootstrapped scenarios and run it.
+        Returns the optimizer's solution dict. Must be called after
+        build_price_scenarios().
         """
-        for t in self.n_period:
-            pass
-        sol = {}
-        return sol
+        opt_inputs = {
+            "positions": self.inputs["positions"],
+            "tax_rate": self.inputs["tax_rate"],
+            "model": self.inputs["model"],
+            "tkr_adev": self.inputs["tkr_adev"],
+            "monthly_prices": self.scenario_prices,
+        }
+        return run_optimizer(opt_inputs)
