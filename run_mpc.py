@@ -70,6 +70,8 @@ if __name__ == "__main__":
     sol = controller.solve()
 
     # persist everything analyze_mpc.py needs so we don't have to re-solve
+    # (also includes the realized 2024 prices and the optimizer config so the
+    # prescient benchmark can be re-run inside analyze_mpc.py)
     output = {
         "sol": sol,
         "scenario_prices": controller.scenario_prices,
@@ -79,6 +81,9 @@ if __name__ == "__main__":
         "n_period": inputs["n_period"],
         "n_scenario": inputs["n_scenario"],
         "all_tkrs": controller.all_tkrs,
+        "actual_prices": monthly_prices,
+        "tax_rate": tax_rate,
+        "tkr_adev": inputs["tkr_adev"],
     }
     with open(OUTPUT_PKL, "wb") as f:
         pickle.dump(output, f)
