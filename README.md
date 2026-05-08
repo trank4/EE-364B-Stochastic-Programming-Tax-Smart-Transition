@@ -2,7 +2,13 @@
 
 Course project for EE364B (Convex Optimization II) at Stanford. Implements stochastic programming methods to optimize tax-smart portfolio transitions — minimizing tax impact while reallocating assets under uncertainty.
 
-> **Status:** the optimizer currently solves the **prescient (single-scenario) case** — perfect foresight over a fixed monthly price path. Multi-scenario extensions are planned but not yet implemented.
+> **Status:** three composable layers are implemented:
+>
+> 1. **`StoxOptimizer`** — multi-scenario stochastic program (Gurobi-backed). One solve over a list of price scenarios produces a per-scenario plan.
+> 2. **`RMPController`** — robust MPC controller. Generates price scenarios via block bootstrap and runs a single t=0 stochastic solve.
+> 3. **`Backtester`** — rolling backtester. Uses an `RMPController` at each step to compute trades, then executes only the first-period trade against realized prices.
+>
+> The single-scenario "prescient" case is recovered by passing a one-element list of realized prices to `StoxOptimizer`.
 
 ---
 
@@ -11,16 +17,21 @@ Course project for EE364B (Convex Optimization II) at Stanford. Implements stoch
 ```
 .
 ├── packages/
-│   └── stochastic-optimizer/       # Installable optimization library (Gurobi-backed)
+│   └── stochastic-optimizer/                # Installable library (Gurobi-backed)
 │       ├── pyproject.toml
 │       └── stochastic_optimizer/
 │           ├── __init__.py
-│           └── optimizer.py        # StoxOptimizer class
-├── run_prescient_case.py           # Prescient (perfect-foresight) benchmark runner
-├── pyproject.toml                  # Root project (application, not a library)
-├── poetry.toml                     # Poetry config (in-project virtualenv)
+│           ├── optimizer.py                 # StoxOptimizer class
+│           ├── RMPController.py             # RMPController class
+│           ├── Backtester.py                # Backtester class
+│           └── analysis_utils.py            # Plotting / metric helpers
+├── run_prescient_case.py                    # Prescient (perfect-foresight) runner
+├── run_mpc.py                               # Run RMPController, pickle solution
+├── analyze_mpc.py                           # Load pickle, plot MPC t=0 plan vs prescient
+├── pyproject.toml                           # Root project (application, not a library)
+├── poetry.toml                              # Poetry config (in-project virtualenv)
 ├── poetry.lock
-└── .pre-commit-config.yaml         # black + isort pre-commit hooks
+└── .pre-commit-config.yaml                  # black + isort pre-commit hooks
 ```
 
 ---
@@ -31,53 +42,146 @@ Course project for EE364B (Convex Optimization II) at Stanford. Implements stoch
 
 Reusable optimization library that wraps Gurobi. Declared as an editable path dependency of the root project.
 
-**Public API** (`from stochastic_optimizer import StoxOptimizer`):
+**Public API** (`from stochastic_optimizer import StoxOptimizer, RMPController, Backtester`):
 
 | Class | File | Description |
 |---|---|---|
-| `StoxOptimizer` | `optimizer.py` | Main optimizer object |
+| `StoxOptimizer` | `optimizer.py` | Multi-scenario stochastic optimizer (Gurobi MIP) |
+| `RMPController` | `RMPController.py` | Generates scenarios via block bootstrap, runs a single t=0 solve |
+| `Backtester` | `Backtester.py` | Rolling MPC backtest along an actual realized price path |
 
 **`StoxOptimizer` interface:**
 
 ```python
 class StoxOptimizer:
-    model: gp.Model        # Gurobi model, initialized in __init__
-    inputs: dict           # see "inputs dict keys" below
-    T: int                 # number of monthly filtration periods
-    n_asset: int           # size of model universe N
-    n_start_pos: int       # number of starting positions L
-    filtration: list[dict] # per-period state: variables, prices, lot info
-    objectives: dict       # name -> [Var, priority] for hierarchical objectives
+    model: gp.Model                     # Gurobi model
+    inputs: dict                        # see "inputs dict keys" below
+    T: int                              # number of monthly filtration periods
+    n_scenario: int                     # number of price scenarios (1 for prescient)
+    n_asset: int                        # size of model universe N
+    n_start_pos: int                    # number of starting lots L
+    filtration: dict[tuple, dict]       # keyed by (s, f) — per-scenario, per-period state
+    portfolio_ub: np.ndarray            # shape (n_scenario, T) — heuristic UB per (s, f)
+    objectives: dict                    # name -> [Var, priority] for the lex hierarchy
 
     def __init__(self, inputs: dict) -> None: ...
-    def build(self) -> None: ...     # Construct variables, constraints, objectives
-    def solve(self) -> None: ...     # Invoke Gurobi solver
+    def build(self) -> None: ...        # construct variables, constraints, objectives
+    def solve(self) -> dict: ...        # invoke Gurobi, return per-(s, f) values
 ```
 
 `build()` runs the following pipeline in order:
 
-1. `build_filtration` — create all decision variables and cache prices/cost basis per filtration.
-2. `build_lot_holding_linking_constraints` — link lot-level shares to ticker-level holdings.
-3. `build_starting_lot_constraints` — anchor lot shares at filtration 0 to the input portfolio.
-4. `build_wash_sales_constraints` — sell aggregation, big-M indicator linking, no-simultaneous-buy-and-sell, dollar self-financing.
-5. `build_lot_dynamics_constraints` — link consecutive periods via sells (existing lots) and buys (new lots).
-6. `build_terminal_deviation_objective` — total absolute deviation from target weights at the final period.
-7. `build_transitory_deviation_objective` — total deviation outside the `±tkr_dev` band at intermediate periods.
-8. `build_tax_cost_objective` — total realized gain/loss across all sells (proxy for tax cost).
-9. `set_objective_hierarchy` — register all three objectives with `setObjectiveN` for lexicographic minimization.
+1. `build_filtration` — for every `(s, f)`, create decision variables and cache prices/cost basis.
+2. `build_lot_holding_linking_constraints` — link lot-level shares to ticker-level holdings (per scenario).
+3. `build_starting_lot_constraints` — anchor lot shares at $f=0$ to the input portfolio in every scenario.
+4. `build_wash_sales_constraints` — sell aggregation, big-M indicator linking, buy/sell exclusivity, dollar self-financing (per scenario, $f<T-1$).
+5. `build_lot_dynamics_constraints` — link consecutive periods within each scenario via sells (existing lots) and buys (new lots).
+6. `build_information_pattern_constraints` — non-anticipativity at $f=1$: $\text{lot\_shr}[(s, 1)]$ must be identical across scenarios, which forces the first-period sells/buys to be identical across scenarios.
+7. `build_terminal_deviation_objective` — average across scenarios of total absolute deviation from target weights at the final period.
+8. `build_transitory_deviation_objective` — average across scenarios of total deviation outside the `±tkr_adev` band at intermediate periods.
+9. `build_tax_cost_objective` — average across scenarios of total realized gain/loss; per-(s, f) `tax_cost_f` variables are reserved for downstream plotting.
+10. `set_objective_hierarchy` — register the three objectives with `setObjectiveN`. If `inputs["MIPGap"]` is set, applies that relative gap to the tax cost stage only via Gurobi's multi-objective sub-environment.
 
 **`inputs` dict keys:**
 
 | Key | Type | Description |
 |---|---|---|
-| `positions` | `pd.DataFrame` | Starting portfolio (`tkr`, `amt`, `cost_basis_amt`; `pnl`/`wt` optional) |
+| `positions` | `pd.DataFrame` | Starting portfolio. Columns: `tkr`, `amt`, `cost_basis_amt`, `shr` (shares). |
 | `tax_rate` | `float` | Flat capital gains tax rate applied to realized gains |
 | `model` | `pd.DataFrame` | Target model portfolio (`tkr`, `tgt_wt`) |
-| `monthly_prices` | `pd.DataFrame` | Month-start prices, rows = periods, columns = tickers |
-| `tkr_dev` | `float` | Allowed weight deviation band (decimal) around target at intermediate filtrations, e.g. `0.05` = ±5% |
-| `scenario_prob` | `list \| None` | Reserved for multi-scenario extension; currently unused |
+| `monthly_prices` | `list[pd.DataFrame]` | One DataFrame per scenario; each has month-start prices (rows = periods, cols = tickers) |
+| `tkr_adev` | `float` | Allowed weight deviation band (decimal) around target at intermediate filtrations, e.g. `0.05` = ±5% |
+| `MIPGap` | `float` *(optional)* | Relative MIP gap applied to the tax-cost stage of the lex hierarchy |
 
 **Dependencies:** `gurobipy >= 11.0.0`, `numpy`, `pandas`
+
+---
+
+### `RMPController` (`packages/stochastic-optimizer/stochastic_optimizer/RMPController.py`)
+
+Robust MPC controller. Single responsibility:
+1. Generate price scenarios via block bootstrap from a historical return window.
+2. Construct a multi-scenario `StoxOptimizer`.
+3. Run a single solve at $t=0$ and return the solution dict.
+
+The rolling/receding-horizon loop is **not** here — it lives in `Backtester`. `RMPController` just generates the t=0 plan.
+
+**Interface:**
+
+```python
+class RMPController:
+    inputs: dict
+    scenario_prices: list[pd.DataFrame]   # populated by build_price_scenarios()
+    all_tkrs: list[str]                   # union of positions["tkr"] and model["tkr"]
+    n_period: int                         # forecast horizon (months)
+    n_scenario: int                       # number of bootstrapped scenarios
+    seed: int                             # RNG seed (default 42)
+    MIPGap: float                         # default 0.05, forwarded to StoxOptimizer
+
+    def __init__(self, inputs: dict) -> None: ...
+    def build_price_scenarios(self) -> None: ...   # populates self.scenario_prices
+    def solve(self) -> dict: ...                   # builds StoxOptimizer and solves once
+```
+
+**Inputs** (in addition to the `StoxOptimizer` base inputs above; `monthly_prices` is generated internally and should not be supplied):
+
+| Key | Type | Description |
+|---|---|---|
+| `start_date` | ISO string or `pd.Timestamp` | Date of the actual portfolio (anchors $t=0$ for all scenarios) |
+| `sim_start_date` | ISO string or `pd.Timestamp` | Start of the historical window used for block bootstrap |
+| `sim_end_date` | ISO string or `pd.Timestamp` | End of the historical window |
+| `n_period` | `int` | Forecast horizon length (months) |
+| `n_scenario` | `int` | Number of price scenarios to generate |
+| `block_length` | `int` | Bootstrap block length in months |
+| `seed` | `int` *(optional)* | RNG seed for reproducibility (default 42) |
+| `MIPGap` | `float` *(optional)* | Relative MIP gap for the tax-cost stage (default 0.05) |
+
+**Block bootstrap.** Let $r_t \in \mathbb{R}^N$ be the monthly return vector at month $t$ in the historical window of length $H$. Form all overlapping blocks of length $B$ (`block_length`):
+
+$$\mathcal{B} = \{ r_{t:t+B-1} : t = 0, 1, \dots, H - B \}.$$
+
+For each scenario $s = 1, \dots, S$, sample $\lceil (T-1)/B \rceil$ blocks i.i.d. with replacement, concatenate, and trim to exactly $T-1$ return vectors. Stitch them with the observed start price $p_0 \in \mathbb{R}^N$:
+
+$$p_t^{(s)} = p_{t-1}^{(s)} \odot (1 + r_t^{(s)}), \quad t = 1, \dots, T-1, \qquad p_0^{(s)} = p_0.$$
+
+The starting price is identical across scenarios (it is observed at $t=0$); divergence happens at $t=1$.
+
+**Solve.** Calls `StoxOptimizer(opt_inputs)` with `monthly_prices = self.scenario_prices` and `MIPGap = self.MIPGap`, then `build()` and `solve()`. Returns the optimizer's solution dict.
+
+---
+
+### `Backtester` (`packages/stochastic-optimizer/stochastic_optimizer/Backtester.py`)
+
+Rolling backtester for the receding-horizon MPC interpretation. At each period $t$ along an **actual** realized price path:
+
+1. Build a fresh `RMPController` with the current positions and `start_date = actual_prices.index[t]`.
+2. Generate scenarios from the most recent observed price; solve once.
+3. Execute only the first-period trades from the resulting plan (receding-horizon principle).
+4. Mark positions to market at $t+1$ actual prices and advance.
+
+**Interface:**
+
+```python
+class Backtester:
+    base_inputs: dict
+    actual_prices: pd.DataFrame           # rows = realized dates, cols = tickers
+
+    def __init__(self, base_inputs: dict, actual_prices: pd.DataFrame) -> None: ...
+    def run(self) -> list[dict]: ...
+```
+
+`run()` loops $t = 0, \dots, |\text{actual\_prices}| - 2$ and returns a list of per-step dicts:
+
+| Key | Description |
+|---|---|
+| `t` | Time step index |
+| `positions_before` | `pd.DataFrame` snapshot entering this step |
+| `sol` | Full optimizer solution from `RMPController.solve()` at this step |
+
+**Position update** (`Backtester._update_positions`). Given `f0_sol = sol["filtration"][(0, 0)]`:
+- For each existing lot $i$: `sell_shr_l[(i, 0)]` shares are removed (j=0 because all current holdings are starting lots in each fresh build). Remaining shares are revalued at $t+1$ prices; cost basis is scaled by the surviving fraction. Lots reduced to (near) zero are dropped.
+- For each ticker with `buy_shr_h[tkr] > 0`: a new lot is created with cost basis equal to the purchase price (period $t$ actual) and `amt` marked at $t+1$ actual.
+- The DataFrame is `reset_index()`'d so its row indices align with the lot indices the next `StoxOptimizer.build()` expects.
 
 ---
 
@@ -259,11 +363,44 @@ Losses contribute negatively, so the optimizer is incentivized to harvest them. 
 
 ## Modeling Notes
 
-- **Single scenario only.** Despite the class name, only one price path is consumed (`monthly_prices`). `scenario_prob` is reserved for a future multi-scenario extension.
+- **Multi-scenario, equally-likely.** All three objectives are averaged across the supplied scenarios with uniform weight $1/S$. Probability-weighted scenarios are not yet supported.
+- **Non-anticipativity at the root only.** The first-period decisions (`sell_shr_l[(s, 0)]`, `buy_shr_h[(s, 0)]`) are forced to be identical across scenarios via `build_information_pattern_constraints`. Beyond $f=1$, decisions are scenario-specific (full recourse).
+- **Sell/buy variables only at non-terminal filtrations.** `sell_shr_l`, `sell_shr_h`, `buy_shr_h`, `sell_h`, `buy_h` are only created for $f < T-1$. The terminal filtration only carries `lot_shr` and `shr_h` (used by the terminal-deviation objective).
 - **Tax cost ≈ realized gain/loss.** With a single flat rate, minimizing $\tau \cdot \text{gains}$ and $\text{gains}$ are equivalent. No short-term vs long-term distinction; loss harvesting is treated 1:1.
-- **Self-financing forces full investment.** Cash positions are not modeled; every sell dollar must be matched by a buy dollar in the same period. A zero-action period is allowed (both sums = 0).
+- **Self-financing forces full investment.** Cash positions are not modeled; every sell dollar must be matched by a buy dollar in the same period (within each scenario). A zero-action period is allowed (both sums = 0).
 - **Wash-sale rule is local.** Only same-period buys and sells of the same ticker are blocked. Cross-period wash sales (real rule: 30 days) are not enforced.
-- **Last-period sells are not bounded by holdings.** The dynamics constraint runs for $f \in \{0, \dots, T-2\}$, so $s^l_{i,j,T-1}$ is bounded only by the variable's UB, not by $x_{i,j,T-1}$. This is a known issue (see TODO); it can be patched by adding $s^l_{i,j,f} \le x_{i,j,f}$ at every $f$, or by treating $T-1$ as a no-trade evaluation period.
+- **MIP gap is per-stage.** When `MIPGap` is supplied, it loosens optimality only on the tax-cost stage of the lex hierarchy via `model.getMultiobjEnv(idx).setParam("MIPGap", value)` — the deviation stages keep Gurobi's default tight gap.
+
+---
+
+## Running the Project
+
+### Prescient (perfect-foresight) benchmark
+
+```bash
+poetry run python run_prescient_case.py
+```
+
+Builds a single-scenario `StoxOptimizer` over realized 2024 prices (wrapped as a one-element list). Saves four PNGs:
+`cumulative_tax_cost.png`, `portfolio_value.png`, `transition_pct.png`, `AAPL_weight_and_price.png`.
+
+### MPC t=0 plan
+
+```bash
+poetry run python run_mpc.py
+```
+
+Runs `RMPController`: bootstrap `n_scenario` price paths from a historical window, build the multi-scenario `StoxOptimizer`, and run a single solve. The solution, scenarios, model, positions, realized prices, and config are pickled to `mpc_output.pkl` for downstream analysis.
+
+### MPC analysis with prescient overlay
+
+```bash
+poetry run python analyze_mpc.py
+```
+
+Loads `mpc_output.pkl`, runs the prescient benchmark on the realized prices for comparison, and produces four overlay plots: cumulative tax cost, total portfolio value, % transition, and AAPL weight + price (dual axis). MPC-t=0 paths are translucent steelblue with a thick mean line; the prescient trajectory overlays as dashed crimson. Output PNGs: `mpc_t0_cumulative_tax_cost.png`, `mpc_t0_portfolio_value.png`, `mpc_t0_transition_pct.png`, `mpc_t0_AAPL_weight_and_price.png`.
+
+> The plots show the **t=0 plan** (one stochastic solve at the start), not a rolling MPC trajectory. The rolling case is `Backtester` and is not yet wrapped by an analysis script.
 
 ---
 
