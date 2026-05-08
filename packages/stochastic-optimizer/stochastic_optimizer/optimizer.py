@@ -714,7 +714,18 @@ class StoxOptimizer:
         values as more important: priority-1 is minimized first, then
         priority-0 is minimized subject to priority-1 staying optimal
         (lexicographic minimization).
+
+        If inputs["MIPGap"] is provided, applies that relative MIP gap to the
+        tax cost stage only (the lowest-priority MIP), since the deviation
+        objectives are LP-friendly and tax cost is the expensive integer stage.
         """
+        tax_cost_idx = None
         for index, (name, (var, priority)) in enumerate(self.objectives.items()):
             self.model.setObjectiveN(var, index=index, priority=priority, name=name)
+            if name == "total_tax_cost":
+                tax_cost_idx = index
         self.model.ModelSense = GRB.MINIMIZE
+
+        if tax_cost_idx is not None and "MIPGap" in self.inputs:
+            env = self.model.getMultiobjEnv(tax_cost_idx)
+            env.setParam("MIPGap", self.inputs["MIPGap"])

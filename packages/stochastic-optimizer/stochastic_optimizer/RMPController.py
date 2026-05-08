@@ -34,6 +34,8 @@ class RMPController:
         self.n_period = self.inputs["n_period"]
         self.n_scenario = self.inputs["n_scenario"]
         self.seed = self.inputs.get("seed", 42)
+        # relative MIP gap applied to the tax-cost stage of the optimizer
+        self.MIPGap = self.inputs.get("MIPGap", 0.05)
 
     def build_price_scenarios(self):
         """
@@ -124,5 +126,6 @@ class RMPController:
             "model": self.inputs["model"],
             "tkr_adev": self.inputs["tkr_adev"],
             "monthly_prices": self.scenario_prices,
+            "MIPGap": self.MIPGap,
         }
         return run_optimizer(opt_inputs)
