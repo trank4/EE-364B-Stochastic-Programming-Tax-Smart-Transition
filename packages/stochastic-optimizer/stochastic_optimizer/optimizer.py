@@ -77,6 +77,7 @@ class StoxOptimizer:
         self.build_starting_lot_constraints()
         self.build_wash_sales_constraints()
         self.build_lot_dynamics_constraints()
+        self.build_information_pattern_constraints()
 
         # build hierarchical objectives for lexicographic optimization
         self.build_terminal_deviation_objective()
@@ -470,6 +471,35 @@ class StoxOptimizer:
                         name=f"buy_lot_dynamics({lot_name},l={i},t={j},f={f}->f={f+1},s={s})",
                     )
 
+        self.model.update()
+
+    def build_information_pattern_constraints(self):
+        """
+        Non-anticipativity at the first decision point: the post-decision state
+        at filtration f=1 (lot shares) must be identical across all scenarios.
+        The optimizer does not know which scenario will materialize when it
+        chooses the f=0 sells and buys, so the resulting state at f=1 cannot
+        depend on s.
+
+        Anchoring lot_shr[(s, 1)] == lot_shr[(0, 1)] for all s >= 1 is
+        equivalent to forcing the first-period sell_shr_l and buy_shr_h
+        decisions to be identical across scenarios:
+          - existing lots at f=0: lot_shr[(s,1)] = lot_shr[(s,0)] - sell_shr_l[(s,0)],
+            and lot_shr[(s,0)] is already pinned by build_starting_lot_constraints
+            to the same value across scenarios, so equal lot_shr[(s,1)] forces
+            equal sell_shr_l[(s,0)].
+          - new lots at f=1: lot_shr[(s,1)][i, 1] = buy_shr_h[(s,0)][tkr], so
+            equal lot_shr[(s,1)] forces equal buy_shr_h[(s,0)].
+        """
+
+        base_lot_shr = self.filtration[(0, 1)]["lot_shr"]
+        for s in range(1, self.n_scenario):
+            scenario_lot_shr = self.filtration[(s, 1)]["lot_shr"]
+            for (i, j), var in scenario_lot_shr.items():
+                self.model.addConstr(
+                    var == base_lot_shr[i, j],
+                    name=f"non_anticip_lot_shr(l={i},t={j},s={s})",
+                )
         self.model.update()
 
     def build_starting_lot_constraints(self):
