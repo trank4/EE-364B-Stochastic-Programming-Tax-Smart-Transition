@@ -90,30 +90,32 @@ class StoxOptimizer:
         build() must be called first.
 
         Returns a dict with:
-        - "filtration": list of per-filtration dicts, one per period, each containing
-          the optimal values (.X) of all decision variables at that filtration:
+        - "filtration": dict keyed by (s, f) with per-(scenario, filtration)
+          dicts containing the optimal values (.X) of all decision variables
+          at that (scenario, filtration):
             lot_shr      — {(i,j): float}  shares held per lot
-            sell_shr_l   — {(i,j): float}  shares sold per lot
             shr_h        — {tkr: float}    total shares held per ticker
-            sell_shr_h   — {tkr: float}    total shares sold per ticker
-            buy_shr_h    — {tkr: float}    total shares bought per ticker
-            sell_h       — {tkr: float}    sell binary indicator per ticker
-            buy_h        — {tkr: float}    buy binary indicator per ticker
-            tax_cost     — float           realized tax cost (filtrations 0..T-2 only)
-            trans_dev    — {tkr: float}    out-of-band deviation (filtrations 1..T-2 only)
-        - one key per objective name (e.g. "total_terminal_dev", "total_trans_dev",
-          "total_tax_cost") mapping to its optimal scalar value.
+            sell_shr_l   — {(i,j): float}  shares sold per lot       (f < T-1 only)
+            sell_shr_h   — {tkr: float}    total shares sold per tkr (f < T-1 only)
+            buy_shr_h    — {tkr: float}    total shares bought       (f < T-1 only)
+            sell_h       — {tkr: float}    sell binary indicator     (f < T-1 only)
+            buy_h        — {tkr: float}    buy binary indicator      (f < T-1 only)
+            tax_cost     — float           realized tax cost         (f < T-1 only)
+            trans_dev    — {tkr: float}    out-of-band deviation     (1 <= f <= T-2)
+            terminal_dev — {tkr: float}    terminal target deviation (f == T-1)
+        - one key per objective name (e.g. "total_terminal_dev",
+          "total_trans_dev", "total_tax_cost") mapping to its optimal scalar
+          value (averaged across equally-likely scenarios).
         """
         self.model.optimize()
-        sol = {}
+        sol = {"filtration": {}}
 
-        sol["filtration"] = []
-        for f, filtration in enumerate(self.filtration):
+        for (s, f), filtration in self.filtration.items():
             f_sol = {
                 "lot_shr": {k: v.X for k, v in filtration["lot_shr"].items()},
                 "shr_h": {k: v.X for k, v in filtration["shr_h"].items()},
             }
-            # sell/buy variables are absent at the terminal filtration
+            # sell/buy variables exist only for non-terminal filtrations
             if f < self.T - 1:
                 f_sol["sell_shr_l"] = {
                     k: v.X for k, v in filtration["sell_shr_l"].items()
@@ -132,7 +134,11 @@ class StoxOptimizer:
                 f_sol["trans_dev"] = {
                     k: v.X for k, v in filtration["trans_dev"].items()
                 }
-            sol["filtration"].append(f_sol)
+            if "terminal_dev" in filtration:
+                f_sol["terminal_dev"] = {
+                    k: v.X for k, v in filtration["terminal_dev"].items()
+                }
+            sol["filtration"][(s, f)] = f_sol
 
         for name, (var, _priority) in self.objectives.items():
             sol[name] = var.X
@@ -426,41 +432,43 @@ class StoxOptimizer:
 
     def build_lot_dynamics_constraints(self):
         """
-        Links the portfolio state across consecutive filtration periods.
+        Links the portfolio state across consecutive filtration periods within
+        each scenario. Dynamics are scenario-local: scenario s at period f only
+        connects to scenario s at period f+1.
+
         For lots that already exist in the current filtration, the holding in
         the next period equals the current holding minus whatever was sold.
         For lots that are new in the next filtration (just purchased), their
         initial holding is set equal to the buy shares from the current period.
         """
-        for f in range(len(self.filtration) - 1):
-            current_filtration = self.filtration[f]
-            next_filtration = self.filtration[f + 1]
-            # for existing lots in current_filtration, the dynamics to next filtration depends on sells
-            for i, j in current_filtration["lot_info"].keys():
-                lot_name = current_filtration["lot_info"][i, j]["tkr"]
-                # constraint to link the current lot, sell_shr_l and the associated lot in next filtration
-                self.model.addConstr(
-                    current_filtration["lot_shr"][i, j]
-                    - current_filtration["sell_shr_l"][i, j]
-                    == next_filtration["lot_shr"][i, j],
-                    name=f"sell_lot_dynamics({lot_name},l={i},t={j},from f={f} to f={f+1})",
-                )
+        for s in range(self.n_scenario):
+            for f in range(self.T - 1):
+                current_filtration = self.filtration[(s, f)]
+                next_filtration = self.filtration[(s, f + 1)]
 
-            # for new lots that exist only in next filtration, the dynamics depends on buys
-            new_lot_indices = (
-                next_filtration["lot_info"].keys()
-                - current_filtration["lot_info"].keys()
-            )
-            for i, j in new_lot_indices:
-                lot_name = next_filtration["lot_info"][i, j]["tkr"]
-                # make sure we get the correct buy variables
-                assert current_filtration["buy_shr_h"][lot_name] is not None
-                # constraint to link the buy_wt_h of the current filtration to new lots in next filtration
-                self.model.addConstr(
-                    next_filtration["lot_shr"][i, j]
-                    == current_filtration["buy_shr_h"][lot_name],
-                    name=f"buy_lot_dynamics({lot_name},l={i},t={j}, from f={f} to f={f+1})",
+                # existing lots: x[f+1] == x[f] - sell_shr_l[f]
+                for i, j in current_filtration["lot_info"].keys():
+                    lot_name = current_filtration["lot_info"][i, j]["tkr"]
+                    self.model.addConstr(
+                        current_filtration["lot_shr"][i, j]
+                        - current_filtration["sell_shr_l"][i, j]
+                        == next_filtration["lot_shr"][i, j],
+                        name=f"sell_lot_dynamics({lot_name},l={i},t={j},f={f}->f={f+1},s={s})",
+                    )
+
+                # new lots in next filtration are seeded by the current buy
+                new_lot_indices = (
+                    next_filtration["lot_info"].keys()
+                    - current_filtration["lot_info"].keys()
                 )
+                for i, j in new_lot_indices:
+                    lot_name = next_filtration["lot_info"][i, j]["tkr"]
+                    assert current_filtration["buy_shr_h"][lot_name] is not None
+                    self.model.addConstr(
+                        next_filtration["lot_shr"][i, j]
+                        == current_filtration["buy_shr_h"][lot_name],
+                        name=f"buy_lot_dynamics({lot_name},l={i},t={j},f={f}->f={f+1},s={s})",
+                    )
 
         self.model.update()
 
@@ -488,126 +496,31 @@ class StoxOptimizer:
 
     def build_terminal_deviation_objective(self):
         """
-        Minimize the total absolute dollar deviation from target weights at
-        the final filtration. For each model ticker k, an auxiliary
-        terminal_dev[k] >= 0 bounds |amount_k - tgt_wt_k * V_T|, encoded by
-        two linear inequalities. The aggregate sum is registered as the
-        priority-1 objective in the lex hierarchy.
+        Minimize the average (across equally-likely scenarios) total absolute
+        dollar deviation from target weights at the final filtration. For each
+        scenario s and model ticker k, an auxiliary terminal_dev[s][k] >= 0
+        bounds |amount_k - tgt_wt_k * V_T(s)| in scenario s, encoded by two
+        linear inequalities. The total objective is
+
+            sum_s sum_k terminal_dev[s][k]
+
+        and is registered as the highest-priority objective in the lex
+        hierarchy.
         """
-        last_filtration = self.filtration[-1]
-        final_portfolio_amount = gp.quicksum(
-            last_filtration["shr_h"][tkr] * last_filtration["tkr_prices"][tkr]
-            for tkr in last_filtration["shr_h"]
-        )
-        # create variables for terminal deviation
         model_tkrs = list(self.inputs["model"]["tkr"])
-        terminal_dev_names = {tkr: f"terminal_dev({tkr})" for tkr in model_tkrs}
-        terminal_dev = self.model.addVars(model_tkrs, lb=0, name=terminal_dev_names)
+        scenario_total_devs = []
 
-        # set up terminal deviation objective variable
-        total_terminal_dev = self.model.addVar(name="total_terminal_dev_objective")
-        self.objectives["total_terminal_dev"] = [total_terminal_dev, 2]
-        self.model.addConstr(
-            total_terminal_dev == gp.quicksum(terminal_dev[tkr] for tkr in model_tkrs),
-            name="total_terminal_dev_objective",
-        )
-
-        for tkr in terminal_dev_names.keys():
-            tkr_tgt_wt = (
-                self.inputs["model"]
-                .loc[self.inputs["model"]["tkr"] == tkr, "tgt_wt"]
-                .item()
-            )
-            tkr_amount = (
+        for s in range(self.n_scenario):
+            last_filtration = self.filtration[(s, self.T - 1)]
+            final_portfolio_amount = gp.quicksum(
                 last_filtration["shr_h"][tkr] * last_filtration["tkr_prices"][tkr]
+                for tkr in last_filtration["shr_h"]
             )
-            self.model.addConstr(
-                tkr_amount - tkr_tgt_wt * final_portfolio_amount <= terminal_dev[tkr],
-                name=f"upper_bound_terminal_dev({tkr})",
-            )
-            self.model.addConstr(
-                tkr_tgt_wt * final_portfolio_amount - tkr_amount <= terminal_dev[tkr],
-                name=f"lower_bound_terminal_dev({tkr})",
-            )
-
-    def build_tax_cost_objective(self):
-        """
-        Minimize total realized gain/loss across all sells and filtrations.
-
-        For each lot (i, j) at filtration f, the per-share gain is
-            price[f] - cost_basis_price[i, j]
-        and the realized P&L from selling sell_shr_l[i, j] shares is
-            sell_shr_l[i, j] * (price[f] - cost_basis_price[i, j]).
-
-        The flat tax rate tau is omitted: with a single rate, scaling the
-        objective by tau doesn't change the argmin. Negative contributions
-        (losses) are kept, so the optimizer can harvest them — the objective
-        variable has lb = -inf accordingly.
-
-        When multi-scenario support is added, prices and the inner sum will
-        gain a scenario index s; the outer expectation E_s[tax(s)] reduces to
-        a sum if scenarios are equally likely, and to a probability-weighted
-        sum otherwise (via inputs["scenario_prob"]).
-        """
-        # create total tax cost objective variable (across all filtrations and all scenarios)
-        # the lower bound is -inf to minimize tax cost as much as possible
-        total_tax_cost = self.model.addVar(lb=-GRB.INFINITY, name="total_tax_cost")
-        self.objectives["total_tax_cost"] = [total_tax_cost, 0]
-        filtration_tax_cost_vars = []
-        for f in range(len(self.filtration) - 1):
-            filtration = self.filtration[f]
-            lot_tax_cost_list = []
-            for i, j in filtration["lot_info"].keys():
-                lot_tkr = filtration["lot_info"][i, j]["tkr"]
-                lot_price = filtration["tkr_prices"][lot_tkr]
-                lot_cost_basis_price = filtration["lot_info"][i, j]["cost_basis_price"]
-                lot_tax_cost = (
-                    self.inputs["tax_rate"]
-                    * filtration["sell_shr_l"][i, j]
-                    * (lot_price - lot_cost_basis_price)
-                )
-                lot_tax_cost_list.append(lot_tax_cost)
-            tax_cost_f = self.model.addVar(lb=-GRB.INFINITY, name=f"tax_cost(f={f})")
-            self.model.addConstr(
-                tax_cost_f == gp.quicksum(lot_tax_cost_list),
-                name=f"tax_cost_def(f={f})",
-            )
-            self.filtration[f]["tax_cost"] = tax_cost_f
-            filtration_tax_cost_vars.append(tax_cost_f)
-        self.model.addConstr(
-            gp.quicksum(filtration_tax_cost_vars) <= total_tax_cost,
-            name="total_tax_cost_objective",
-        )
-
-    def build_transitory_deviation_objective(self):
-        """
-        Minimize the total dollar deviation outside the ±tkr_dev tolerance band
-        around target weights across intermediate filtrations (f=1 to T-2).
-
-        For each model ticker k at filtration f, trans_dev[f][k] >= 0 captures
-        how far the holding strays outside the band [tgt_wt_k - tkr_dev, tgt_wt_k + tkr_dev],
-        encoded by two linear inequalities in dollar space:
-            tkr_amount_k - (tgt_wt_k + tkr_dev) * V_f <= trans_dev[f][k]
-            (tgt_wt_k - tkr_dev) * V_f - tkr_amount_k <= trans_dev[f][k]
-        Within the band both RHS's are <= 0 so trans_dev[f][k] can stay at 0.
-
-        The aggregate sum is registered as priority-1 (same lex level as terminal
-        deviation) so intermediate alignment is optimized alongside terminal alignment
-        before tax cost minimization.
-        """
-        model_tkrs = list(self.inputs["model"]["tkr"])
-        tkr_dev = self.inputs["tkr_adev"]
-        all_trans_dev_vars = []
-
-        for f in range(1, len(self.filtration) - 1):
-            filtration = self.filtration[f]
-            portfolio_amount_f = gp.quicksum(
-                filtration["shr_h"][tkr] * filtration["tkr_prices"][tkr]
-                for tkr in filtration["shr_h"]
-            )
-            trans_dev_names = {tkr: f"trans_dev({tkr},f={f})" for tkr in model_tkrs}
-            trans_dev = self.model.addVars(model_tkrs, lb=0, name=trans_dev_names)
-            self.filtration[f]["trans_dev"] = trans_dev
+            terminal_dev_names = {
+                tkr: f"terminal_dev({tkr},s={s})" for tkr in model_tkrs
+            }
+            terminal_dev = self.model.addVars(model_tkrs, lb=0, name=terminal_dev_names)
+            last_filtration["terminal_dev"] = terminal_dev
 
             for tkr in model_tkrs:
                 tkr_tgt_wt = (
@@ -615,24 +528,153 @@ class StoxOptimizer:
                     .loc[self.inputs["model"]["tkr"] == tkr, "tgt_wt"]
                     .item()
                 )
-                tkr_amount = filtration["shr_h"][tkr] * filtration["tkr_prices"][tkr]
-                self.model.addConstr(
-                    tkr_amount - (tkr_tgt_wt + tkr_dev) * portfolio_amount_f
-                    <= trans_dev[tkr],
-                    name=f"upper_bound_trans_dev({tkr},f={f})",
+                tkr_amount = (
+                    last_filtration["shr_h"][tkr] * last_filtration["tkr_prices"][tkr]
                 )
                 self.model.addConstr(
-                    (tkr_tgt_wt - tkr_dev) * portfolio_amount_f - tkr_amount
-                    <= trans_dev[tkr],
-                    name=f"lower_bound_trans_dev({tkr},f={f})",
+                    tkr_amount - tkr_tgt_wt * final_portfolio_amount
+                    <= terminal_dev[tkr],
+                    name=f"upper_bound_terminal_dev({tkr},s={s})",
                 )
-                all_trans_dev_vars.append(trans_dev[tkr])
+                self.model.addConstr(
+                    tkr_tgt_wt * final_portfolio_amount - tkr_amount
+                    <= terminal_dev[tkr],
+                    name=f"lower_bound_terminal_dev({tkr},s={s})",
+                )
+
+            scenario_total_devs.append(
+                gp.quicksum(terminal_dev[tkr] for tkr in model_tkrs)
+            )
+
+        total_terminal_dev = self.model.addVar(name="total_terminal_dev_objective")
+        self.objectives["total_terminal_dev"] = [total_terminal_dev, 2]
+        self.model.addConstr(
+            total_terminal_dev == gp.quicksum(scenario_total_devs),
+            name="total_terminal_dev_objective",
+        )
+
+    def build_transitory_deviation_objective(self):
+        """
+        Minimize the average (across equally-likely scenarios) total dollar
+        deviation outside the ±tkr_adev tolerance band around target weights at
+        intermediate filtrations f=1..T-2.
+
+        For each (s, f, k), trans_dev[s][f][k] >= 0 captures how far the
+        holding strays outside the band [tgt_wt_k - tkr_adev, tgt_wt_k + tkr_adev]
+        in scenario s at period f, encoded as two linear inequalities in dollar
+        space. Within the band both RHSs are <= 0 so trans_dev can stay at 0.
+
+        The aggregate is
+
+            sum_s[ sum_{f=1..T-2} sum_k trans_dev[s][f][k] ]
+
+        registered at priority 1.
+        """
+        model_tkrs = list(self.inputs["model"]["tkr"])
+        tkr_dev = self.inputs["tkr_adev"]
+        scenario_trans_dev_sums = []
+
+        for s in range(self.n_scenario):
+            scenario_dev_vars = []
+            for f in range(1, self.T - 1):
+                filtration = self.filtration[(s, f)]
+                portfolio_amount_f = gp.quicksum(
+                    filtration["shr_h"][tkr] * filtration["tkr_prices"][tkr]
+                    for tkr in filtration["shr_h"]
+                )
+                trans_dev_names = {
+                    tkr: f"trans_dev({tkr},f={f},s={s})" for tkr in model_tkrs
+                }
+                trans_dev = self.model.addVars(model_tkrs, lb=0, name=trans_dev_names)
+                filtration["trans_dev"] = trans_dev
+
+                for tkr in model_tkrs:
+                    tkr_tgt_wt = (
+                        self.inputs["model"]
+                        .loc[self.inputs["model"]["tkr"] == tkr, "tgt_wt"]
+                        .item()
+                    )
+                    tkr_amount = (
+                        filtration["shr_h"][tkr] * filtration["tkr_prices"][tkr]
+                    )
+                    self.model.addConstr(
+                        tkr_amount - (tkr_tgt_wt + tkr_dev) * portfolio_amount_f
+                        <= trans_dev[tkr],
+                        name=f"upper_bound_trans_dev({tkr},f={f},s={s})",
+                    )
+                    self.model.addConstr(
+                        (tkr_tgt_wt - tkr_dev) * portfolio_amount_f - tkr_amount
+                        <= trans_dev[tkr],
+                        name=f"lower_bound_trans_dev({tkr},f={f},s={s})",
+                    )
+                    scenario_dev_vars.append(trans_dev[tkr])
+
+            scenario_trans_dev_sums.append(gp.quicksum(scenario_dev_vars))
 
         total_trans_dev = self.model.addVar(lb=0, name="total_trans_dev_objective")
         self.objectives["total_trans_dev"] = [total_trans_dev, 1]
         self.model.addConstr(
-            total_trans_dev == gp.quicksum(all_trans_dev_vars),
+            total_trans_dev == gp.quicksum(scenario_trans_dev_sums),
             name="total_trans_dev_objective",
+        )
+
+    def build_tax_cost_objective(self):
+        """
+        Minimize the average (across equally-likely scenarios) total realized
+        tax cost across all sells and filtrations.
+
+        For each (s, f), a per-period tax cost variable
+
+            tax_cost[s, f] = tau * sum_{(i,j) in L_f} sell_shr_l[s,f][i,j] *
+                             (price[s,f][tkr] - cost_basis_price[s][i,j])
+
+        is created and stored in self.filtration[(s, f)]["tax_cost"] for easy
+        downstream access (e.g. plotting per-period tax cost). The objective is
+
+            E_s[ sum_{f=0..T-2} tax_cost[s, f] ] = (1/S) sum_s sum_f tax_cost[s, f]
+
+        Negative contributions (losses) are kept so the optimizer can harvest
+        them — the objective variable has lb = -inf accordingly. Registered at
+        priority 0 (lowest in the lex hierarchy).
+        """
+        total_tax_cost = self.model.addVar(lb=-GRB.INFINITY, name="total_tax_cost")
+        self.objectives["total_tax_cost"] = [total_tax_cost, 0]
+
+        scenario_tax_cost_sums = []
+        for s in range(self.n_scenario):
+            scenario_tax_cost_vars = []
+            for f in range(self.T - 1):
+                filtration = self.filtration[(s, f)]
+                lot_tax_cost_list = []
+                for i, j in filtration["lot_info"].keys():
+                    lot_tkr = filtration["lot_info"][i, j]["tkr"]
+                    lot_price = filtration["tkr_prices"][lot_tkr]
+                    lot_cost_basis_price = filtration["lot_info"][i, j][
+                        "cost_basis_price"
+                    ]
+                    lot_tax_cost = (
+                        self.inputs["tax_rate"]
+                        * filtration["sell_shr_l"][i, j]
+                        * (lot_price - lot_cost_basis_price)
+                    )
+                    lot_tax_cost_list.append(lot_tax_cost)
+
+                tax_cost_f = self.model.addVar(
+                    lb=-GRB.INFINITY, name=f"tax_cost(f={f},s={s})"
+                )
+                self.model.addConstr(
+                    tax_cost_f == gp.quicksum(lot_tax_cost_list),
+                    name=f"tax_cost_def(f={f},s={s})",
+                )
+                # reserved per (s, f) for downstream plotting / inspection
+                filtration["tax_cost"] = tax_cost_f
+                scenario_tax_cost_vars.append(tax_cost_f)
+
+            scenario_tax_cost_sums.append(gp.quicksum(scenario_tax_cost_vars))
+
+        self.model.addConstr(
+            total_tax_cost == gp.quicksum(scenario_tax_cost_sums) / self.n_scenario,
+            name="total_tax_cost_objective",
         )
 
     def set_objective_hierarchy(self):
