@@ -1,5 +1,7 @@
+import pickle
+
+from stochastic_optimizer import RMPController
 from stochastic_optimizer.analysis_utils import *
-from stochastic_optimizer.RMPController import run_RMPController
 
 top20_spy_tickers = [
     "AAPL",
@@ -23,6 +25,8 @@ top20_spy_tickers = [
     "HD",
     "KO",
 ]
+
+OUTPUT_PKL = "mpc_output.pkl"
 
 if __name__ == "__main__":
     monthly_prices = fetch_monthly_price(
@@ -60,4 +64,21 @@ if __name__ == "__main__":
         "tkr_adev": 0.05,
     }
 
-    sol = run_RMPController(inputs)
+    controller = RMPController(inputs)
+    controller.build_price_scenarios()
+    sol = controller.solve()
+
+    # persist everything analyze_mpc.py needs so we don't have to re-solve
+    output = {
+        "sol": sol,
+        "scenario_prices": controller.scenario_prices,
+        "model": model,
+        "positions": positions,
+        "start_date": inputs["start_date"],
+        "n_period": inputs["n_period"],
+        "n_scenario": inputs["n_scenario"],
+        "all_tkrs": controller.all_tkrs,
+    }
+    with open(OUTPUT_PKL, "wb") as f:
+        pickle.dump(output, f)
+    print(f"\nSaved MPC output to {OUTPUT_PKL}")

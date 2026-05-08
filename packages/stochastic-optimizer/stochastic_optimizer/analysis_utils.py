@@ -206,3 +206,173 @@ def calculate_transition_pct(
         sum_under = sum(max(0.0, wt - row.get(tkr, 0.0)) for tkr, wt in tgt_wt.items())
         result[date] = 1.0 - max(sum_over, sum_under)
     return pd.Series(result)
+
+
+# ---------------------------------------------------------------------------
+# Multi-scenario MPC plotting helpers
+# ---------------------------------------------------------------------------
+
+
+def _per_scenario_cumulative_tax(
+    sol: dict, n_scenario: int, n_period: int
+) -> np.ndarray:
+    """
+    Returns shape (n_scenario, n_period - 1) of cumulative tax cost over time
+    for each scenario.
+    """
+    out = np.zeros((n_scenario, n_period - 1))
+    for s in range(n_scenario):
+        per_period = [
+            sol["filtration"][(s, f)]["tax_cost"] for f in range(n_period - 1)
+        ]
+        out[s] = np.cumsum(per_period)
+    return out
+
+
+def _per_scenario_weights(
+    sol: dict, scenario_prices: list[pd.DataFrame], all_tkrs: list[str]
+) -> np.ndarray:
+    """
+    Returns shape (n_scenario, n_period, n_tkr) of portfolio weights per
+    scenario, period, and ticker, computed from shr_h and the scenario's own
+    price path.
+    """
+    n_scenario = len(scenario_prices)
+    n_period = scenario_prices[0].shape[0]
+    n_tkr = len(all_tkrs)
+    out = np.zeros((n_scenario, n_period, n_tkr))
+    for s in range(n_scenario):
+        for f in range(n_period):
+            shr_h = sol["filtration"][(s, f)]["shr_h"]
+            prices = scenario_prices[s].iloc[f]
+            dollars = np.array([shr_h.get(tkr, 0.0) * prices[tkr] for tkr in all_tkrs])
+            total = dollars.sum()
+            if total > 0:
+                out[s, f, :] = dollars / total
+    return out
+
+
+def _per_scenario_transition_pct(
+    weights: np.ndarray, all_tkrs: list[str], model: pd.DataFrame
+) -> np.ndarray:
+    """
+    Returns shape (n_scenario, n_period) of transition pct per scenario.
+    """
+    n_scenario, n_period, _ = weights.shape
+    tgt_series = model.set_index("tkr")["tgt_wt"]
+    tgt_arr = np.array([float(tgt_series.get(tkr, 0.0)) for tkr in all_tkrs])
+    out = np.zeros((n_scenario, n_period))
+    for s in range(n_scenario):
+        for f in range(n_period):
+            diff = weights[s, f] - tgt_arr
+            sum_over = np.maximum(diff, 0.0).sum()
+            sum_under = np.maximum(-diff, 0.0).sum()
+            out[s, f] = 1.0 - max(sum_over, sum_under)
+    return out
+
+
+def _plot_paths_with_mean(
+    ax, dates, paths: np.ndarray, color: str, label_prefix: str
+) -> None:
+    """
+    Plot every row of `paths` (shape n_scenario x n_period) on `ax` with low
+    alpha, plus the cross-scenario mean as a thick solid line.
+    """
+    for path in paths:
+        ax.plot(dates, path, color=color, alpha=0.2, linewidth=1)
+    mean_path = paths.mean(axis=0)
+    ax.plot(dates, mean_path, color=color, linewidth=2.5, label=f"{label_prefix} mean")
+
+
+def plot_mpc_cumulative_tax_cost(
+    sol: dict, dates, n_scenario: int, n_period: int
+) -> None:
+    """
+    Plot per-scenario cumulative realized tax cost (translucent) plus the mean
+    across scenarios. Saves to mpc_cumulative_tax_cost.png.
+    """
+    paths = _per_scenario_cumulative_tax(sol, n_scenario, n_period)  # (S, T-1)
+    trade_dates = dates[: paths.shape[1]]
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    _plot_paths_with_mean(ax, trade_dates, paths, color="steelblue", label_prefix="")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Cumulative Tax Cost ($)")
+    ax.set_title("MPC Cumulative Realized Tax Cost (per scenario + mean)")
+    ax.xaxis.set_tick_params(rotation=45)
+    ax.legend()
+    fig.tight_layout()
+    plt.savefig("mpc_cumulative_tax_cost.png", dpi=150)
+    plt.show()
+
+
+def plot_mpc_transition_pct(
+    sol: dict,
+    scenario_prices: list[pd.DataFrame],
+    model: pd.DataFrame,
+    dates,
+) -> None:
+    """
+    Plot per-scenario % transition (translucent) plus the mean across scenarios.
+    Saves to mpc_transition_pct.png.
+    """
+    all_tkrs = list(scenario_prices[0].columns)
+    weights = _per_scenario_weights(sol, scenario_prices, all_tkrs)
+    paths = _per_scenario_transition_pct(weights, all_tkrs, model)  # (S, T)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    _plot_paths_with_mean(ax, dates, paths, color="steelblue", label_prefix="")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("% Transition")
+    ax.set_title("MPC Portfolio Transition Progress (per scenario + mean)")
+    ax.set_ylim(0, 1)
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
+    ax.xaxis.set_tick_params(rotation=45)
+    ax.legend()
+    fig.tight_layout()
+    plt.savefig("mpc_transition_pct.png", dpi=150)
+    plt.show()
+
+
+def plot_mpc_ticker_weight_and_price(
+    sol: dict,
+    scenario_prices: list[pd.DataFrame],
+    tkr: str,
+    dates,
+) -> None:
+    """
+    Dual-axis plot: per-scenario portfolio weight of `tkr` (translucent + mean)
+    on the left axis, per-scenario price of `tkr` (translucent + mean) on the
+    right axis. Saves to mpc_<tkr>_weight_and_price.png.
+    """
+    all_tkrs = list(scenario_prices[0].columns)
+    tkr_idx = all_tkrs.index(tkr)
+    weights = _per_scenario_weights(sol, scenario_prices, all_tkrs)  # (S, T, K)
+    weight_paths = weights[:, :, tkr_idx]  # (S, T)
+    price_paths = np.stack([sp[tkr].values for sp in scenario_prices])  # (S, T)
+
+    fig, ax1 = plt.subplots(figsize=(10, 4))
+    _plot_paths_with_mean(
+        ax1, dates, weight_paths, color="steelblue", label_prefix=f"{tkr} weight"
+    )
+    ax1.set_xlabel("Date")
+    ax1.set_ylabel("Portfolio Weight", color="steelblue")
+    ax1.tick_params(axis="y", labelcolor="steelblue")
+    ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
+    ax1.xaxis.set_tick_params(rotation=45)
+
+    ax2 = ax1.twinx()
+    _plot_paths_with_mean(
+        ax2, dates, price_paths, color="darkorange", label_prefix=f"{tkr} price"
+    )
+    ax2.set_ylabel("Price ($)", color="darkorange")
+    ax2.tick_params(axis="y", labelcolor="darkorange")
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
+
+    fig.suptitle(f"MPC {tkr} Weight and Price (per scenario + mean)")
+    fig.tight_layout()
+    plt.savefig(f"mpc_{tkr}_weight_and_price.png", dpi=150)
+    plt.show()

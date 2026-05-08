@@ -26,7 +26,6 @@ class RMPController:
     def __init__(self, inputs: dict):
         self.inputs = inputs
         self.scenario_prices: list[pd.DataFrame] = []
-        self.optimizer: StoxOptimizer | None = None
 
         # all tickers
         self.all_tkrs = list(
