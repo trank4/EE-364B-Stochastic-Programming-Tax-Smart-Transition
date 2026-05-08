@@ -328,18 +328,18 @@ class StoxOptimizer:
 
     def build_lot_holding_linking_constraints(self):
         """
-        Defines shr_h[tkr] as the sum of all lot shares belonging to that ticker.
-        This makes shr_h the canonical per-ticker holding shares that downstream
-        constraints (terminal deviation objective) can reference
-        without having to sum over lots themselves.
+        Defines shr_h[tkr] as the sum of all lot shares belonging to that ticker,
+        per (scenario, filtration). This makes shr_h the canonical per-ticker
+        holding shares that downstream constraints (terminal deviation objective)
+        can reference without having to sum over lots themselves.
         """
-        for f, filtration in enumerate(self.filtration):
+        for (s, f), filtration in self.filtration.items():
             tkr_to_lot_indices = filtration["tkr_to_lot_indices"]
             for tkr, lot_indices in tkr_to_lot_indices.items():
                 self.model.addConstr(
                     filtration["shr_h"][tkr]
                     == gp.quicksum(filtration["lot_shr"][i, j] for i, j in lot_indices),
-                    name=f"lot_shr_to_shr_h({tkr},f={f})",
+                    name=f"lot_shr_to_shr_h({tkr},f={f},s={s})",
                 )
 
     def build_wash_sales_constraints(self):
