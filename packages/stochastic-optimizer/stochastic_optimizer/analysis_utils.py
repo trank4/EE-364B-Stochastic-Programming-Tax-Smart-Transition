@@ -30,14 +30,30 @@ def fetch_monthly_price(tickers: list[str], start_date, end_date) -> pd.DataFram
 # ---------------------------------------------------------------------------
 
 
-def plot_cumulative_tax_cost(sol: dict, monthly_prices: pd.DataFrame) -> None:
+def _scenario_filtrations(sol: dict, s: int) -> list[dict]:
     """
-    Plot cumulative realized tax cost across filtration periods.
+    Extract per-period filtration dicts for a single scenario s, in order
+    f=0..T-1. sol["filtration"] is keyed by (s, f) tuples.
+    """
+    items = [(f, fs) for (sk, f), fs in sol["filtration"].items() if sk == s]
+    items.sort(key=lambda kv: kv[0])
+    return [fs for _, fs in items]
+
+
+def plot_cumulative_tax_cost(
+    sol: dict, monthly_prices: pd.DataFrame, s: int = 0
+) -> None:
+    """
+    Plot cumulative realized tax cost across filtration periods for scenario s.
     Saves the figure to cumulative_tax_cost.png.
     """
     dates = monthly_prices.index
     per_period_tax = np.array(
-        [f_sol["tax_cost"] for f_sol in sol["filtration"] if "tax_cost" in f_sol]
+        [
+            f_sol["tax_cost"]
+            for f_sol in _scenario_filtrations(sol, s)
+            if "tax_cost" in f_sol
+        ]
     )
     cumulative_tax = np.cumsum(per_period_tax)
     trade_dates = dates[: len(per_period_tax)]
@@ -54,10 +70,11 @@ def plot_cumulative_tax_cost(sol: dict, monthly_prices: pd.DataFrame) -> None:
 
 
 def calculate_portfolio_weights(
-    sol: dict, monthly_prices: pd.DataFrame
+    sol: dict, monthly_prices: pd.DataFrame, s: int = 0
 ) -> pd.DataFrame:
     """
-    Compute portfolio weight of each ticker at every filtration period.
+    Compute portfolio weight of each ticker at every filtration period for
+    scenario s.
 
     For filtration f, weight_k = (shr_h[k] * price_k) / total_portfolio_value.
     Tickers not present in shr_h at a given period are assigned weight 0.
@@ -66,7 +83,7 @@ def calculate_portfolio_weights(
     """
     all_tkrs = list(monthly_prices.columns)
     records = []
-    for f, f_sol in enumerate(sol["filtration"]):
+    for f, f_sol in enumerate(_scenario_filtrations(sol, s)):
         prices = monthly_prices.iloc[f]
         dollar_vals = {
             tkr: f_sol["shr_h"].get(tkr, 0.0) * prices[tkr] for tkr in all_tkrs
@@ -98,14 +115,14 @@ def plot_transition_pct(transition_pct: pd.Series) -> None:
     plt.show()
 
 
-def plot_portfolio_value(sol: dict, monthly_prices: pd.DataFrame) -> None:
+def plot_portfolio_value(sol: dict, monthly_prices: pd.DataFrame, s: int = 0) -> None:
     """
-    Plot total portfolio value in dollars at each filtration period.
-    Saves the figure to portfolio_value.png.
+    Plot total portfolio value in dollars at each filtration period for
+    scenario s. Saves the figure to portfolio_value.png.
     """
     dates = monthly_prices.index
     total_values = []
-    for f, f_sol in enumerate(sol["filtration"]):
+    for f, f_sol in enumerate(_scenario_filtrations(sol, s)):
         prices = monthly_prices.iloc[f]
         total_val = sum(
             f_sol["shr_h"].get(tkr, 0.0) * prices[tkr] for tkr in monthly_prices.columns

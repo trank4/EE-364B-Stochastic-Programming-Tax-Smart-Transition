@@ -67,12 +67,15 @@ if __name__ == "__main__":
     )
 
     # combine everything into inputs dict
+    # monthly_prices is wrapped in a list because the optimizer accepts a
+    # per-scenario list of price DataFrames; the prescient case is a single
+    # scenario with the realized 2024 prices.
     inputs = {
         "positions": positions,
         "tax_rate": tax_rate,
         "model": model,
         "tkr_adev": 0.05,
-        "monthly_prices": monthly_prices,
+        "monthly_prices": [monthly_prices],
     }
     # build and run optimizer
     sol = run_optimizer(inputs)
