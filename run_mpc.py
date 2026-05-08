@@ -42,10 +42,10 @@ if __name__ == "__main__":
     positions = pd.DataFrame(
         {"tkr": ["AAPL"], "amt": [1000000], "cost_basis_amt": [500000]}
     )
-    positions["pnl"] = (positions["amt"] - positions["cost_basis_amt"]) / positions[
-        "amt"
-    ].sum()
-    positions["wt"] = positions["amt"] / positions["amt"].sum()
+    start_prices = monthly_prices.iloc[0]  # Series indexed by ticker
+    positions["price"] = positions["tkr"].map(start_prices)
+    positions["shr"] = positions["amt"] / positions["price"]
+    positions["cost_basis_price"] = positions["cost_basis_amt"] / positions["shr"]
 
     # assuming for simplicity 1 tax rate of 30%
     tax_rate = 0.3
