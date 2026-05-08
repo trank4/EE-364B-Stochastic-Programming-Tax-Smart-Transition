@@ -351,55 +351,65 @@ class StoxOptimizer:
 
     def build_wash_sales_constraints(self):
         """
-        Adds three groups of constraints for every filtration period:
+        Adds four groups of constraints for every (scenario, non-terminal
+        filtration) pair:
         1. Aggregation — sell_shr_h[tkr] equals the sum of sell_shr_l across all
            lots of that ticker, linking lot-level and holding-level sell weights.
-        2. Big-M linking — sell_shr_h and buy_shr_h are each upper-bounded by 100
-           times their binary indicator, so a shares can only be nonzero when the
-           corresponding indicator is 1.
+        2. Big-M linking — sell_shr_h and buy_shr_h are each upper-bounded by
+           their UB times their binary indicator, so shares can only be nonzero
+           when the corresponding indicator is 1.
         3. Wash-sale prevention — for tickers that appear in both the sell and buy
            universes, buy_h + sell_h <= 1 prevents simultaneous buy and sell.
+        4. Self-financing — dollar value sold equals dollar value bought within
+           the same period (and same scenario), at the scenario's prices.
+
+        Skips terminal filtrations (f == T-1) since sell/buy variables don't
+        exist there.
         """
-        for f, filtration in enumerate(self.filtration[:-1]):
+        for (s, f), filtration in self.filtration.items():
+            if f == self.T - 1:
+                continue
+
             tkr_to_lot_indices = filtration["tkr_to_lot_indices"]
 
-            for tkr in self.filtration[f]["all_tkrs_to_sell"]:
+            for tkr in filtration["all_tkrs_to_sell"]:
                 lot_indices_for_tkr = tkr_to_lot_indices[tkr]
-                # constraint to map sell_shr_l with sell_shr_h
+                # sell_shr_l aggregates to sell_shr_h
                 self.model.addConstr(
                     filtration["sell_shr_h"][tkr]
                     == gp.quicksum(
                         filtration["sell_shr_l"][i, j] for i, j in lot_indices_for_tkr
                     ),
-                    name=f"sell_l_to_h_mapping({tkr},f={f})",
+                    name=f"sell_l_to_h_mapping({tkr},f={f},s={s})",
                 )
-
+                # big-M linking sell shares to sell binary
                 self.model.addConstr(
                     filtration["sell_shr_h"][tkr]
                     <= filtration["sell_h"][tkr] * filtration["sell_shr_h"][tkr].UB,
-                    name=f"upper_sell_binary({tkr}, f={f})",
+                    name=f"upper_sell_binary({tkr},f={f},s={s})",
                 )
 
-            for tkr in self.filtration[f]["all_tkrs_to_buy"]:
+            for tkr in filtration["all_tkrs_to_buy"]:
+                # big-M linking buy shares to buy binary
                 self.model.addConstr(
                     filtration["buy_shr_h"][tkr]
                     <= filtration["buy_h"][tkr] * filtration["buy_shr_h"][tkr].UB,
-                    name=f"upper_buy_binary({tkr}, f={f})",
+                    name=f"upper_buy_binary({tkr},f={f},s={s})",
                 )
 
             tkrs_both_buy_and_sell = [
                 tkr
-                for tkr in self.filtration[f]["all_tkrs_to_sell"]
-                if tkr in self.filtration[f]["all_tkrs_to_buy"]
+                for tkr in filtration["all_tkrs_to_sell"]
+                if tkr in filtration["all_tkrs_to_buy"]
             ]
             for tkr in tkrs_both_buy_and_sell:
-                # constraint that only one of buy_h and sell_h can be one
+                # only one of buy_h and sell_h can be 1 (wash-sale prevention)
                 self.model.addConstr(
                     filtration["buy_h"][tkr] + filtration["sell_h"][tkr] <= 1.0,
-                    name=f"buy_sell_exclusivity({tkr}, f={f})",
+                    name=f"buy_sell_exclusivity({tkr},f={f},s={s})",
                 )
 
-            # buy and sell in same filtration has to equal $ amount
+            # self-financing: dollar value sold = dollar value bought
             sell_amount = gp.quicksum(
                 filtration["sell_shr_h"][tkr] * filtration["tkr_prices"][tkr]
                 for tkr in filtration["sell_shr_h"]
@@ -410,7 +420,7 @@ class StoxOptimizer:
             )
             self.model.addConstr(
                 sell_amount == buy_amount,
-                name=f"self-financing-constr(f={f})",
+                name=f"self-financing-constr(f={f},s={s})",
             )
         self.model.update()
 
