@@ -450,20 +450,24 @@ class StoxOptimizer:
     def build_starting_lot_constraints(self):
         """
         Anchors the lot shares at filtration 0 to the actual portfolio shares
-        from the input positions. Without this, the solver would be free to set
-        the initial holdings to any value.
+        from the input positions, in every scenario. Without this, the solver
+        would be free to set the initial holdings to any value. Anchoring all
+        scenarios to the same `shr` also enforces non-anticipativity at the
+        root: every scenario must start from the observed portfolio.
         """
-        starting_filtration = self.filtration[0]
-        for i, j in starting_filtration["lot_info"].keys():
-            assert (
-                self.inputs["positions"].iloc[i]["tkr"]
-                == starting_filtration["lot_info"][i, j]["tkr"]
-            )
-            self.model.addConstr(
-                starting_filtration["lot_shr"][i, j]
-                == (self.inputs["positions"].iloc[i]["shr"]),
-                name=f"start_lot_shr({i},t={j})",
-            )
+        for (s, f), filtration in self.filtration.items():
+            if f != 0:
+                continue
+            for i, j in filtration["lot_info"].keys():
+                assert (
+                    self.inputs["positions"].iloc[i]["tkr"]
+                    == filtration["lot_info"][i, j]["tkr"]
+                )
+                self.model.addConstr(
+                    filtration["lot_shr"][i, j]
+                    == self.inputs["positions"].iloc[i]["shr"],
+                    name=f"start_lot_shr({i},t={j},s={s})",
+                )
 
     def build_terminal_deviation_objective(self):
         """
