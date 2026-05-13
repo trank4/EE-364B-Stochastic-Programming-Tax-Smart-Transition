@@ -35,9 +35,12 @@ class StoxOptimizer:
 
         # infer number of starting positions
         self.n_start_pos = self.inputs["positions"].shape[0]
-        # create filtration
+        # create filtration — periods are 1-indexed (f = 1..T). Filtration f
+        # observes prices monthly_prices.iloc[f-1] and produces post-decision
+        # state lot_shr[(s, f)]. Lots bought at filtration f are indexed
+        # (i, f); starting lots are (i, 0).
         self.filtration = {
-            (s, f): {} for f in range(self.T) for s in range(self.n_scenario)
+            (s, f): {} for f in range(1, self.T + 1) for s in range(self.n_scenario)
         }
 
         self.n_lot = None  # total lots in optimization, populated later
@@ -66,15 +69,15 @@ class StoxOptimizer:
     def build(self) -> None:
         """
         Assemble the full Gurobi model by running each build stage in order:
-        filtration variables, lot/holding linking, starting-lot anchors,
-        wash-sale + self-financing constraints, and lot dynamics constraints,
-        followed by the two hierarchical objectives (terminal deviation, tax
-        cost) registered for lexicographic minimization. Must be called before
+        filtration variables, lot/holding linking, wash-sale + self-financing
+        constraints, and lot dynamics constraints (which also anchor the
+        initial holdings at f=0), followed by the three hierarchical
+        objectives (terminal deviation, transitory deviation, tax cost)
+        registered for lexicographic minimization. Must be called before
         solve().
         """
         self.build_filtration()
         self.build_lot_holding_linking_constraints()
-        self.build_starting_lot_constraints()
         self.build_wash_sales_constraints()
         self.build_lot_dynamics_constraints()
         self.build_information_pattern_constraints()
@@ -93,17 +96,17 @@ class StoxOptimizer:
         Returns a dict with:
         - "filtration": dict keyed by (s, f) with per-(scenario, filtration)
           dicts containing the optimal values (.X) of all decision variables
-          at that (scenario, filtration):
-            lot_shr      — {(i,j): float}  shares held per lot
+          at that (scenario, filtration). Filtration index f runs from 1 to T:
+            lot_shr      — {(i,j): float}  post-decision shares held per lot
             shr_h        — {tkr: float}    total shares held per ticker
-            sell_shr_l   — {(i,j): float}  shares sold per lot       (f < T-1 only)
-            sell_shr_h   — {tkr: float}    total shares sold per tkr (f < T-1 only)
-            buy_shr_h    — {tkr: float}    total shares bought       (f < T-1 only)
-            sell_h       — {tkr: float}    sell binary indicator     (f < T-1 only)
-            buy_h        — {tkr: float}    buy binary indicator      (f < T-1 only)
-            tax_cost     — float           realized tax cost         (f < T-1 only)
-            trans_dev    — {tkr: float}    out-of-band deviation     (1 <= f <= T-2)
-            terminal_dev — {tkr: float}    terminal target deviation (f == T-1)
+            sell_shr_l   — {(i,j): float}  shares sold per existing lot
+            sell_shr_h   — {tkr: float}    total shares sold per tkr
+            buy_shr_h    — {tkr: float}    total shares bought
+            sell_h       — {tkr: float}    sell binary indicator
+            buy_h        — {tkr: float}    buy binary indicator
+            tax_cost     — float           realized tax cost
+            trans_dev    — {tkr: float}    out-of-band deviation     (1 <= f <= T-1)
+            terminal_dev — {tkr: float}    terminal target deviation (f == T)
         - one key per objective name (e.g. "total_terminal_dev",
           "total_trans_dev", "total_tax_cost") mapping to its optimal scalar
           value (averaged across equally-likely scenarios).
@@ -115,20 +118,12 @@ class StoxOptimizer:
             f_sol = {
                 "lot_shr": {k: v.X for k, v in filtration["lot_shr"].items()},
                 "shr_h": {k: v.X for k, v in filtration["shr_h"].items()},
+                "sell_shr_l": {k: v.X for k, v in filtration["sell_shr_l"].items()},
+                "sell_shr_h": {k: v.X for k, v in filtration["sell_shr_h"].items()},
+                "buy_shr_h": {k: v.X for k, v in filtration["buy_shr_h"].items()},
+                "sell_h": {k: v.X for k, v in filtration["sell_h"].items()},
+                "buy_h": {k: v.X for k, v in filtration["buy_h"].items()},
             }
-            # sell/buy variables exist only for non-terminal filtrations
-            if f < self.T - 1:
-                f_sol["sell_shr_l"] = {
-                    k: v.X for k, v in filtration["sell_shr_l"].items()
-                }
-                f_sol["sell_shr_h"] = {
-                    k: v.X for k, v in filtration["sell_shr_h"].items()
-                }
-                f_sol["buy_shr_h"] = {
-                    k: v.X for k, v in filtration["buy_shr_h"].items()
-                }
-                f_sol["sell_h"] = {k: v.X for k, v in filtration["sell_h"].items()}
-                f_sol["buy_h"] = {k: v.X for k, v in filtration["buy_h"].items()}
             if "tax_cost" in filtration:
                 f_sol["tax_cost"] = filtration["tax_cost"].X
             if "trans_dev" in filtration:
@@ -162,12 +157,23 @@ class StoxOptimizer:
     def build_filtration(self) -> None:
         """
         Creates all Gurobi decision variables for every (filtration, scenario)
-        pair and stores them in self.filtration[(s, f)]. The lot index set grows
-        by N new lots each period (one per model asset) and is identical across
-        scenarios — only the variable values, prices, and bounds differ per
-        scenario. Also computes and caches each lot's market price and cost
-        basis (per scenario) so downstream constraint-building methods can read
-        them directly from lot_info.
+        pair and stores them in self.filtration[(s, f)], with f in 1..T.
+        Within each filtration the buy/sell decisions come first and lot_shr
+        is the resulting post-decision state. New lots created by the buy
+        decision at filtration f are indexed (i, f) and appear in the same
+        filtration. Starting lots are (i, 0).
+
+        sell-side variables (sell_shr_l, sell_shr_h, sell_h) and the
+        ticker-to-lot mapping used for sell aggregation are created only over
+        the **existing** lots at filtration f (those carried in from f-1, or
+        the starting lots at f=1) — not over the just-purchased lots, which
+        cannot be sold at the same filtration. lot_shr / shr_h / buy_shr_h /
+        buy_h cover all lots / all model tickers.
+
+        The lot index set is identical across scenarios — only the variable
+        values, prices, and bounds differ per scenario. Each lot's market
+        price and cost basis (per scenario) is cached on lot_info for
+        downstream constraint-building methods.
         """
         all_tkrs = list(
             set(self.inputs["positions"]["tkr"]).union(set(self.inputs["model"]["tkr"]))
@@ -177,11 +183,18 @@ class StoxOptimizer:
         total_lot = 0
         for s in range(self.n_scenario):
             scenario_prices = self.inputs["monthly_prices"][s]
-            # first period only include starting lots; after each filtration there
-            # is a new column with n_asset new lots that we can sell from. So the
-            # total number of lots grows linearly: start lots + f * n_asset
+            # at each filtration f, the lot set grows by n_asset new lots
+            # (indexed (i, f)) created by the buy decision at f. Starting
+            # lots (i, 0) are always present. Total at f: n_start_pos + f *
+            # n_asset.
             lot_indices = [(i, 0) for i in range(self.n_start_pos)]
-            for f in range(self.T):
+            for f in range(1, self.T + 1):
+                # existing lots = those present prior to the buy at f
+                # (starting lots at f=1, plus everything bought at f' < f)
+                existing_lot_indices = list(lot_indices)
+                # new lots from buy at f
+                new_lot_indices = [(i, f) for i in range(self.n_asset)]
+                lot_indices = existing_lot_indices + new_lot_indices
                 assert len(lot_indices) == self.n_start_pos + f * self.n_asset
                 total_lot += len(lot_indices)
 
@@ -194,9 +207,10 @@ class StoxOptimizer:
                     for (i, j), info in lot_info.items()
                 }
 
-                # cache per-ticker prices for this (s, f)
+                # cache per-ticker prices for this (s, f); prices at
+                # filtration f live at row f-1 of the 0-indexed DataFrame.
                 self.filtration[(s, f)]["tkr_prices"] = {
-                    tkr: scenario_prices.iloc[f][tkr] for tkr in all_tkrs
+                    tkr: scenario_prices.iloc[f - 1][tkr] for tkr in all_tkrs
                 }
 
                 for (i, j), info in lot_info.items():
@@ -207,13 +221,16 @@ class StoxOptimizer:
                             "cost_basis_price"
                         ]
                     else:
-                        # purchased lot: cost basis = price at the period it was bought
+                        # purchased lot: cost basis = price at filtration j
+                        # (where the lot was bought). prices row j-1 = price
+                        # at filtration j.
                         info["cost_basis_price"] = scenario_prices.iloc[j - 1][
                             info["tkr"]
                         ]
 
-                # heuristic UB: putting the whole portfolio (at scenario s, period f) in 1 lot
-                portfolio_ub = self.portfolio_ub[s, f]
+                # heuristic UB: putting the whole portfolio (at scenario s, filtration f)
+                # in a single lot. portfolio_ub is 0-indexed: row f-1 = f.
+                portfolio_ub = self.portfolio_ub[s, f - 1]
                 lot_shr_ub = {
                     (i, j): float(
                         np.ceil(
@@ -229,11 +246,21 @@ class StoxOptimizer:
                     lot_indices, lb=0.0, ub=lot_shr_ub, name=lot_names
                 )
 
-                # ticker -> lot indices mapping (same across scenarios but stored per-key for ergonomics)
+                # ticker -> lot indices mapping (all lots, used for shr_h)
                 tkr_to_lot_indices = defaultdict(list)
                 for i, j in lot_indices:
                     tkr_to_lot_indices[self.lot_ticker(i, j)].append((i, j))
                 self.filtration[s, f]["tkr_to_lot_indices"] = dict(tkr_to_lot_indices)
+
+                # ticker -> existing lot indices (sell-side only). New lots
+                # at this filtration cannot be sold yet.
+                existing_tkr_to_lot_indices = defaultdict(list)
+                for i, j in existing_lot_indices:
+                    existing_tkr_to_lot_indices[self.lot_ticker(i, j)].append((i, j))
+                self.filtration[(s, f)]["existing_lot_indices"] = existing_lot_indices
+                self.filtration[(s, f)]["existing_tkr_to_lot_indices"] = dict(
+                    existing_tkr_to_lot_indices
+                )
 
                 shr_h_names = {
                     tkr: f"shr_h({tkr},f={f},s={s})" for tkr in tkr_to_lot_indices
@@ -251,91 +278,84 @@ class StoxOptimizer:
                     name=shr_h_names,
                 )
 
-                # sell/buy variables only exist for non-terminal filtrations: selling at T-1
-                # has no effect on shr_h[T-1] (used by terminal deviation) and is never
-                # linked forward by lot dynamics, so these variables would be unconstrained.
-                if f < self.T - 1:
-                    sell_shr_l_names = {
-                        (i, j): f"sell_shr_l({info['tkr']},l={i},t={j},f={f},s={s})"
-                        for (i, j), info in lot_info.items()
-                    }
-                    sell_shr_l_ub = {
-                        (i, j): float(
-                            np.ceil(
-                                portfolio_ub
-                                / self.filtration[(s, f)]["tkr_prices"][
-                                    lot_info[i, j]["tkr"]
-                                ]
-                            )
+                # sell_shr_l only exists for existing lots
+                sell_shr_l_names = {
+                    (
+                        i,
+                        j,
+                    ): f"sell_shr_l({lot_info[i, j]['tkr']},l={i},t={j},f={f},s={s})"
+                    for (i, j) in existing_lot_indices
+                }
+                sell_shr_l_ub = {
+                    (i, j): float(
+                        np.ceil(
+                            portfolio_ub
+                            / self.filtration[(s, f)]["tkr_prices"][
+                                lot_info[i, j]["tkr"]
+                            ]
                         )
-                        for i, j in lot_indices
-                    }
-                    self.filtration[(s, f)]["sell_shr_l"] = self.model.addVars(
-                        lot_indices,
-                        lb=0.0,
-                        ub=sell_shr_l_ub,
-                        name=sell_shr_l_names,
                     )
+                    for i, j in existing_lot_indices
+                }
+                self.filtration[(s, f)]["sell_shr_l"] = self.model.addVars(
+                    existing_lot_indices,
+                    lb=0.0,
+                    ub=sell_shr_l_ub,
+                    name=sell_shr_l_names,
+                )
 
-                    all_tkrs_to_sell = list(tkr_to_lot_indices.keys())
-                    self.filtration[(s, f)]["all_tkrs_to_sell"] = all_tkrs_to_sell
-                    sell_shr_h_names = {
-                        tkr: f"sell_shr_h({tkr},f={f},s={s})"
-                        for tkr in all_tkrs_to_sell
-                    }
-                    sell_shr_h_ub = {
-                        tkr: np.ceil(
-                            portfolio_ub / self.filtration[(s, f)]["tkr_prices"][tkr]
-                        )
-                        for tkr in all_tkrs_to_sell
-                    }
-                    self.filtration[(s, f)]["sell_shr_h"] = self.model.addVars(
-                        all_tkrs_to_sell,
-                        lb=0.0,
-                        ub=sell_shr_h_ub,
-                        name=sell_shr_h_names,
+                # sell-side aggregation only over tickers with existing lots
+                all_tkrs_to_sell = list(existing_tkr_to_lot_indices.keys())
+                self.filtration[(s, f)]["all_tkrs_to_sell"] = all_tkrs_to_sell
+                sell_shr_h_names = {
+                    tkr: f"sell_shr_h({tkr},f={f},s={s})" for tkr in all_tkrs_to_sell
+                }
+                sell_shr_h_ub = {
+                    tkr: np.ceil(
+                        portfolio_ub / self.filtration[(s, f)]["tkr_prices"][tkr]
                     )
+                    for tkr in all_tkrs_to_sell
+                }
+                self.filtration[(s, f)]["sell_shr_h"] = self.model.addVars(
+                    all_tkrs_to_sell,
+                    lb=0.0,
+                    ub=sell_shr_h_ub,
+                    name=sell_shr_h_names,
+                )
 
-                    self.filtration[(s, f)]["all_tkrs_to_buy"] = all_tkrs_to_buy_const
-                    buy_shr_h_names = {
-                        tkr: f"buy_shr_h({tkr},f={f},s={s})"
-                        for tkr in all_tkrs_to_buy_const
-                    }
-                    buy_shr_h_ub = {
-                        tkr: np.ceil(
-                            portfolio_ub / self.filtration[(s, f)]["tkr_prices"][tkr]
-                        )
-                        for tkr in all_tkrs_to_buy_const
-                    }
-                    self.filtration[(s, f)]["buy_shr_h"] = self.model.addVars(
-                        all_tkrs_to_buy_const,
-                        lb=0.0,
-                        ub=buy_shr_h_ub,
-                        name=buy_shr_h_names,
+                self.filtration[(s, f)]["all_tkrs_to_buy"] = all_tkrs_to_buy_const
+                buy_shr_h_names = {
+                    tkr: f"buy_shr_h({tkr},f={f},s={s})"
+                    for tkr in all_tkrs_to_buy_const
+                }
+                buy_shr_h_ub = {
+                    tkr: np.ceil(
+                        portfolio_ub / self.filtration[(s, f)]["tkr_prices"][tkr]
                     )
+                    for tkr in all_tkrs_to_buy_const
+                }
+                self.filtration[(s, f)]["buy_shr_h"] = self.model.addVars(
+                    all_tkrs_to_buy_const,
+                    lb=0.0,
+                    ub=buy_shr_h_ub,
+                    name=buy_shr_h_names,
+                )
 
-                    buy_h_names = {
-                        tkr: f"buy_h({tkr},f={f},s={s})"
-                        for tkr in all_tkrs_to_buy_const
-                    }
-                    self.filtration[(s, f)]["buy_h"] = self.model.addVars(
-                        all_tkrs_to_buy_const, vtype=GRB.BINARY, name=buy_h_names
-                    )
+                buy_h_names = {
+                    tkr: f"buy_h({tkr},f={f},s={s})" for tkr in all_tkrs_to_buy_const
+                }
+                self.filtration[(s, f)]["buy_h"] = self.model.addVars(
+                    all_tkrs_to_buy_const, vtype=GRB.BINARY, name=buy_h_names
+                )
 
-                    sell_h_names = {
-                        tkr: f"sell_h({tkr},f={f},s={s})" for tkr in all_tkrs_to_sell
-                    }
-                    self.filtration[(s, f)]["sell_h"] = self.model.addVars(
-                        all_tkrs_to_sell, vtype=GRB.BINARY, name=sell_h_names
-                    )
+                sell_h_names = {
+                    tkr: f"sell_h({tkr},f={f},s={s})" for tkr in all_tkrs_to_sell
+                }
+                self.filtration[(s, f)]["sell_h"] = self.model.addVars(
+                    all_tkrs_to_sell, vtype=GRB.BINARY, name=sell_h_names
+                )
 
                 self.filtration[(s, f)]["lot_info"] = lot_info
-
-                # update lot indices for next filtration (same growth across scenarios)
-                if f < self.T - 1:
-                    lot_indices = lot_indices + [
-                        (i, f + 1) for i in range(self.n_asset)
-                    ]
 
         self.model.update()
         self.n_lot = total_lot
@@ -358,10 +378,10 @@ class StoxOptimizer:
 
     def build_wash_sales_constraints(self):
         """
-        Adds four groups of constraints for every (scenario, non-terminal
-        filtration) pair:
-        1. Aggregation — sell_shr_h[tkr] equals the sum of sell_shr_l across all
-           lots of that ticker, linking lot-level and holding-level sell weights.
+        Adds four groups of constraints for every (scenario, filtration) pair:
+        1. Aggregation — sell_shr_h[tkr] equals the sum of sell_shr_l across the
+           existing lots of that ticker (new lots at this filtration cannot be
+           sold), linking lot-level and holding-level sell weights.
         2. Big-M linking — sell_shr_h and buy_shr_h are each upper-bounded by
            their UB times their binary indicator, so shares can only be nonzero
            when the corresponding indicator is 1.
@@ -369,19 +389,13 @@ class StoxOptimizer:
            universes, buy_h + sell_h <= 1 prevents simultaneous buy and sell.
         4. Self-financing — dollar value sold equals dollar value bought within
            the same period (and same scenario), at the scenario's prices.
-
-        Skips terminal filtrations (f == T-1) since sell/buy variables don't
-        exist there.
         """
         for (s, f), filtration in self.filtration.items():
-            if f == self.T - 1:
-                continue
-
-            tkr_to_lot_indices = filtration["tkr_to_lot_indices"]
+            existing_tkr_to_lot_indices = filtration["existing_tkr_to_lot_indices"]
 
             for tkr in filtration["all_tkrs_to_sell"]:
-                lot_indices_for_tkr = tkr_to_lot_indices[tkr]
-                # sell_shr_l aggregates to sell_shr_h
+                lot_indices_for_tkr = existing_tkr_to_lot_indices[tkr]
+                # sell_shr_l aggregates to sell_shr_h (existing lots only)
                 self.model.addConstr(
                     filtration["sell_shr_h"][tkr]
                     == gp.quicksum(
@@ -433,63 +447,81 @@ class StoxOptimizer:
 
     def build_lot_dynamics_constraints(self):
         """
-        Links the portfolio state across consecutive filtration periods within
-        each scenario. Dynamics are scenario-local: scenario s at period f only
-        connects to scenario s at period f+1.
+        Links the post-decision state lot_shr at filtration f to the
+        pre-decision state (initial holdings for f=1, lot_shr at f-1 for
+        f >= 2) and the buy/sell decisions made at f. Dynamics are
+        scenario-local: each constraint stays within a single scenario s.
 
-        For lots that already exist in the current filtration, the holding in
-        the next period equals the current holding minus whatever was sold.
-        For lots that are new in the next filtration (just purchased), their
-        initial holding is set equal to the buy shares from the current period.
+        Existing lots at f (those carried in from f-1, or the starting
+        lots at f=1) follow
+
+            lot_shr[f][i,j] = prev_shr[i,j] - sell_shr_l[f][i,j].
+
+        New lots at f (indexed (i, f), created by the buy decision at f)
+        follow
+
+            lot_shr[f][i,f] = buy_shr_h[f][tkr_i].
+
+        No sell-side variable exists for new lots — they cannot be sold at
+        the same filtration in which they were purchased.
+
+        At f=1 the prior shares are the user-provided starting positions,
+        so this method also anchors the initial holdings — there is no
+        separate starting-lot constraint.
         """
         for s in range(self.n_scenario):
-            for f in range(self.T - 1):
+            for f in range(1, self.T + 1):
                 current_filtration = self.filtration[(s, f)]
-                next_filtration = self.filtration[(s, f + 1)]
+                existing_lot_indices = current_filtration["existing_lot_indices"]
 
-                # existing lots: x[f+1] == x[f] - sell_shr_l[f]
-                for i, j in current_filtration["lot_info"].keys():
+                # existing lots: prev_shr[i,j] - sell_shr_l[f][i,j] == lot_shr[f][i,j]
+                if f == 1:
+                    for i, j in existing_lot_indices:
+                        lot_name = current_filtration["lot_info"][i, j]["tkr"]
+                        prev_shr = self.inputs["positions"].iloc[i]["shr"]
+                        self.model.addConstr(
+                            prev_shr - current_filtration["sell_shr_l"][i, j]
+                            == current_filtration["lot_shr"][i, j],
+                            name=f"sell_lot_dynamics({lot_name},l={i},t={j},f={f},s={s})",
+                        )
+                else:
+                    prev_filtration = self.filtration[(s, f - 1)]
+                    for i, j in existing_lot_indices:
+                        lot_name = current_filtration["lot_info"][i, j]["tkr"]
+                        self.model.addConstr(
+                            prev_filtration["lot_shr"][i, j]
+                            - current_filtration["sell_shr_l"][i, j]
+                            == current_filtration["lot_shr"][i, j],
+                            name=f"sell_lot_dynamics({lot_name},l={i},t={j},f={f},s={s})",
+                        )
+
+                # new lots in this filtration are seeded by the buy at f
+                new_lot_indices = set(current_filtration["lot_info"].keys()) - set(
+                    existing_lot_indices
+                )
+                for i, j in new_lot_indices:
                     lot_name = current_filtration["lot_info"][i, j]["tkr"]
                     self.model.addConstr(
                         current_filtration["lot_shr"][i, j]
-                        - current_filtration["sell_shr_l"][i, j]
-                        == next_filtration["lot_shr"][i, j],
-                        name=f"sell_lot_dynamics({lot_name},l={i},t={j},f={f}->f={f+1},s={s})",
-                    )
-
-                # new lots in next filtration are seeded by the current buy
-                new_lot_indices = (
-                    next_filtration["lot_info"].keys()
-                    - current_filtration["lot_info"].keys()
-                )
-                for i, j in new_lot_indices:
-                    lot_name = next_filtration["lot_info"][i, j]["tkr"]
-                    assert current_filtration["buy_shr_h"][lot_name] is not None
-                    self.model.addConstr(
-                        next_filtration["lot_shr"][i, j]
                         == current_filtration["buy_shr_h"][lot_name],
-                        name=f"buy_lot_dynamics({lot_name},l={i},t={j},f={f}->f={f+1},s={s})",
+                        name=f"buy_lot_dynamics({lot_name},l={i},t={j},f={f},s={s})",
                     )
 
         self.model.update()
 
     def build_information_pattern_constraints(self):
         """
-        Non-anticipativity at the first decision point: the post-decision state
-        at filtration f=1 (lot shares) must be identical across all scenarios.
-        The optimizer does not know which scenario will materialize when it
-        chooses the f=0 sells and buys, so the resulting state at f=1 cannot
-        depend on s.
+        Non-anticipativity at the first decision point: the f=1 buy/sell
+        decisions, and hence the post-decision state lot_shr[(s, 1)] they
+        produce, must be identical across all scenarios. The optimizer does
+        not know which scenario will materialize when it commits to the f=1
+        trades.
 
-        Anchoring lot_shr[(s, 1)] == lot_shr[(0, 1)] for all s >= 1 is
-        equivalent to forcing the first-period sell_shr_l and buy_shr_h
-        decisions to be identical across scenarios:
-          - existing lots at f=0: lot_shr[(s,1)] = lot_shr[(s,0)] - sell_shr_l[(s,0)],
-            and lot_shr[(s,0)] is already pinned by build_starting_lot_constraints
-            to the same value across scenarios, so equal lot_shr[(s,1)] forces
-            equal sell_shr_l[(s,0)].
-          - new lots at f=1: lot_shr[(s,1)][i, 1] = buy_shr_h[(s,0)][tkr], so
-            equal lot_shr[(s,1)] forces equal buy_shr_h[(s,0)].
+        Anchoring lot_shr[(s, 1)] == lot_shr[(0, 1)] for all s >= 1 directly
+        enforces this: every scenario starts from the same input positions
+        (same initial shares, same lot index set at f=1), so equal
+        post-decision lot_shr[(s, 1)] forces equal sell_shr_l[(s, 1)] and
+        buy_shr_h[(s, 1)] across scenarios.
         """
 
         base_lot_shr = self.filtration[(0, 1)]["lot_shr"]
@@ -501,28 +533,6 @@ class StoxOptimizer:
                     name=f"non_anticip_lot_shr(l={i},t={j},s={s})",
                 )
         self.model.update()
-
-    def build_starting_lot_constraints(self):
-        """
-        Anchors the lot shares at filtration 0 to the actual portfolio shares
-        from the input positions, in every scenario. Without this, the solver
-        would be free to set the initial holdings to any value. Anchoring all
-        scenarios to the same `shr` also enforces non-anticipativity at the
-        root: every scenario must start from the observed portfolio.
-        """
-        for (s, f), filtration in self.filtration.items():
-            if f != 0:
-                continue
-            for i, j in filtration["lot_info"].keys():
-                assert (
-                    self.inputs["positions"].iloc[i]["tkr"]
-                    == filtration["lot_info"][i, j]["tkr"]
-                )
-                self.model.addConstr(
-                    filtration["lot_shr"][i, j]
-                    == self.inputs["positions"].iloc[i]["shr"],
-                    name=f"start_lot_shr({i},t={j},s={s})",
-                )
 
     def build_terminal_deviation_objective(self):
         """
@@ -541,7 +551,7 @@ class StoxOptimizer:
         scenario_total_devs = []
 
         for s in range(self.n_scenario):
-            last_filtration = self.filtration[(s, self.T - 1)]
+            last_filtration = self.filtration[(s, self.T)]
             final_portfolio_amount = gp.quicksum(
                 last_filtration["shr_h"][tkr] * last_filtration["tkr_prices"][tkr]
                 for tkr in last_filtration["shr_h"]
@@ -587,7 +597,7 @@ class StoxOptimizer:
         """
         Minimize the average (across equally-likely scenarios) total dollar
         deviation outside the ±tkr_adev tolerance band around target weights at
-        intermediate filtrations f=1..T-2.
+        intermediate post-decision states f=1..T-1.
 
         For each (s, f, k), trans_dev[s][f][k] >= 0 captures how far the
         holding strays outside the band [tgt_wt_k - tkr_adev, tgt_wt_k + tkr_adev]
@@ -596,9 +606,10 @@ class StoxOptimizer:
 
         The aggregate is
 
-            sum_s[ sum_{f=1..T-2} sum_k trans_dev[s][f][k] ]
+            sum_s[ sum_{f=1..T-1} sum_k trans_dev[s][f][k] ]
 
-        registered at priority 1.
+        registered at priority 1. The terminal filtration f=T is excluded
+        because it is covered by the (hard) terminal deviation objective.
         """
         model_tkrs = list(self.inputs["model"]["tkr"])
         tkr_dev = self.inputs["tkr_adev"]
@@ -606,7 +617,7 @@ class StoxOptimizer:
 
         for s in range(self.n_scenario):
             scenario_dev_vars = []
-            for f in range(1, self.T - 1):
+            for f in range(1, self.T):
                 filtration = self.filtration[(s, f)]
                 portfolio_amount_f = gp.quicksum(
                     filtration["shr_h"][tkr] * filtration["tkr_prices"][tkr]
@@ -655,13 +666,15 @@ class StoxOptimizer:
 
         For each (s, f), a per-period tax cost variable
 
-            tax_cost[s, f] = tau * sum_{(i,j) in L_f} sell_shr_l[s,f][i,j] *
+            tax_cost[s, f] = tau * sum_{(i,j) in E_f} sell_shr_l[s,f][i,j] *
                              (price[s,f][tkr] - cost_basis_price[s][i,j])
 
         is created and stored in self.filtration[(s, f)]["tax_cost"] for easy
-        downstream access (e.g. plotting per-period tax cost). The objective is
+        downstream access (e.g. plotting per-period tax cost). The sum runs
+        over existing lots E_f only (sell_shr_l doesn't exist for new lots).
+        The objective is
 
-            E_s[ sum_{f=0..T-2} tax_cost[s, f] ] = (1/S) sum_s sum_f tax_cost[s, f]
+            E_s[ sum_{f=1..T} tax_cost[s, f] ] = (1/S) sum_s sum_f tax_cost[s, f]
 
         Negative contributions (losses) are kept so the optimizer can harvest
         them — the objective variable has lb = -inf accordingly. Registered at
@@ -673,10 +686,10 @@ class StoxOptimizer:
         scenario_tax_cost_sums = []
         for s in range(self.n_scenario):
             scenario_tax_cost_vars = []
-            for f in range(self.T - 1):
+            for f in range(1, self.T + 1):
                 filtration = self.filtration[(s, f)]
                 lot_tax_cost_list = []
-                for i, j in filtration["lot_info"].keys():
+                for i, j in filtration["existing_lot_indices"]:
                     lot_tkr = filtration["lot_info"][i, j]["tkr"]
                     lot_price = filtration["tkr_prices"][lot_tkr]
                     lot_cost_basis_price = filtration["lot_info"][i, j][
@@ -715,9 +728,11 @@ class StoxOptimizer:
         priority-0 is minimized subject to priority-1 staying optimal
         (lexicographic minimization).
 
-        If inputs["MIPGap"] is provided, applies that relative MIP gap to the
-        tax cost stage only (the lowest-priority MIP), since the deviation
-        objectives are LP-friendly and tax cost is the expensive integer stage.
+        In the multi-scenario case (n_scenario > 1) the tax cost stage
+        is the expensive integer stage (binaries × scenarios) and is
+        loosened to a 5% relative MIP gap via
+        `model.getMultiobjEnv(idx).setParam("MIPGap", 0.05)`. The deviation
+        stages and the single-scenario case keep Gurobi's default tight gap.
         """
         tax_cost_idx = None
         for index, (name, (var, priority)) in enumerate(self.objectives.items()):
@@ -726,6 +741,6 @@ class StoxOptimizer:
                 tax_cost_idx = index
         self.model.ModelSense = GRB.MINIMIZE
 
-        if tax_cost_idx is not None and "MIPGap" in self.inputs:
+        if tax_cost_idx is not None and self.n_scenario > 1:
             env = self.model.getMultiobjEnv(tax_cost_idx)
-            env.setParam("MIPGap", self.inputs["MIPGap"])
+            env.setParam("MIPGap", 0.05)

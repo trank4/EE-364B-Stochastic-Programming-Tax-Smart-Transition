@@ -33,7 +33,8 @@ def fetch_monthly_price(tickers: list[str], start_date, end_date) -> pd.DataFram
 def _scenario_filtrations(sol: dict, s: int) -> list[dict]:
     """
     Extract per-period filtration dicts for a single scenario s, in order
-    f=0..T-1. sol["filtration"] is keyed by (s, f) tuples.
+    f=1..T. sol["filtration"] is keyed by (s, f) tuples. The returned list
+    is 0-indexed: index k corresponds to filtration f = k + 1.
     """
     items = [(f, fs) for (sk, f), fs in sol["filtration"].items() if sk == s]
     items.sort(key=lambda kv: kv[0])
@@ -217,13 +218,13 @@ def _per_scenario_cumulative_tax(
     sol: dict, n_scenario: int, n_period: int
 ) -> np.ndarray:
     """
-    Returns shape (n_scenario, n_period - 1) of cumulative tax cost over time
-    for each scenario.
+    Returns shape (n_scenario, n_period) of cumulative tax cost over time
+    for each scenario. Filtration index f runs from 1 to n_period.
     """
-    out = np.zeros((n_scenario, n_period - 1))
+    out = np.zeros((n_scenario, n_period))
     for s in range(n_scenario):
         per_period = [
-            sol["filtration"][(s, f)]["tax_cost"] for f in range(n_period - 1)
+            sol["filtration"][(s, f)]["tax_cost"] for f in range(1, n_period + 1)
         ]
         out[s] = np.cumsum(per_period)
     return out
@@ -242,13 +243,13 @@ def _per_scenario_weights(
     n_tkr = len(all_tkrs)
     out = np.zeros((n_scenario, n_period, n_tkr))
     for s in range(n_scenario):
-        for f in range(n_period):
+        for f in range(1, n_period + 1):
             shr_h = sol["filtration"][(s, f)]["shr_h"]
-            prices = scenario_prices[s].iloc[f]
+            prices = scenario_prices[s].iloc[f - 1]
             dollars = np.array([shr_h.get(tkr, 0.0) * prices[tkr] for tkr in all_tkrs])
             total = dollars.sum()
             if total > 0:
-                out[s, f, :] = dollars / total
+                out[s, f - 1, :] = dollars / total
     return out
 
 
@@ -282,10 +283,10 @@ def _per_scenario_portfolio_value(
     n_period = scenario_prices[0].shape[0]
     out = np.zeros((n_scenario, n_period))
     for s in range(n_scenario):
-        for f in range(n_period):
+        for f in range(1, n_period + 1):
             shr_h = sol["filtration"][(s, f)]["shr_h"]
-            prices = scenario_prices[s].iloc[f]
-            out[s, f] = sum(shr_h.get(tkr, 0.0) * prices[tkr] for tkr in all_tkrs)
+            prices = scenario_prices[s].iloc[f - 1]
+            out[s, f - 1] = sum(shr_h.get(tkr, 0.0) * prices[tkr] for tkr in all_tkrs)
     return out
 
 
@@ -316,7 +317,7 @@ def plot_mpc_t0_cumulative_tax_cost(
     from the prescient run), overlay it as a dashed crimson line for
     comparison. Saves to mpc_t0_cumulative_tax_cost.png.
     """
-    paths = _per_scenario_cumulative_tax(sol, n_scenario, n_period)  # (S, T-1)
+    paths = _per_scenario_cumulative_tax(sol, n_scenario, n_period)  # (S, T)
     trade_dates = dates[: paths.shape[1]]
 
     fig, ax = plt.subplots(figsize=(10, 4))
