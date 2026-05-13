@@ -5,8 +5,9 @@ The plots show the stochastic optimizer's t=0 plan: per-scenario trajectories
 the solver computed under each bootstrapped price path. They are not rolling
 MPC trajectories — Backtester is responsible for the rolling case.
 
-Loads the pickle written by run_mpc.py, runs the prescient (perfect-foresight)
-benchmark on the realized prices, and produces four overlay plots:
+Loads the pickle written by run_mpc.py, loads the prescient (perfect-foresight)
+benchmark sol from the pickle written by run_prescient_case.py, and produces
+four overlay plots:
   - cumulative tax cost            (MPC t=0 plan paths + mean, prescient dashed)
   - total portfolio value          (MPC t=0 plan paths + mean, prescient dashed)
   - % transition                   (MPC t=0 plan paths + mean, prescient dashed)
@@ -24,28 +25,21 @@ from quant_oracle.analysis_utils import (
     plot_mpc_t0_ticker_weight_and_price,
     plot_mpc_t0_transition_pct,
 )
-from quant_oracle.optimizer import run_optimizer
 
-INPUT_PKL = "mpc_output.pkl"
+MPC_INPUT_PKL = "mpc_output.pkl"
+PRESCIENT_INPUT_PKL = "prescient_output.pkl"
 
-# fallback defaults used only if the pickle was generated before run_mpc.py
-# started saving these fields (Option 2: backfill instead of forcing a re-solve)
-DEFAULT_TAX_RATE = 0.3
-DEFAULT_TKR_ADEV = 0.05
 
 if __name__ == "__main__":
-    with open(INPUT_PKL, "rb") as f:
+    with open(MPC_INPUT_PKL, "rb") as f:
         out = pickle.load(f)
 
     sol = out["sol"]
     scenario_prices = out["scenario_prices"]
     model = out["model"]
-    positions = out["positions"]
     start_date = out["start_date"]
     n_period = out["n_period"]
     n_scenario = out["n_scenario"]
-    tax_rate = out.get("tax_rate", DEFAULT_TAX_RATE)
-    tkr_adev = out.get("tkr_adev", DEFAULT_TKR_ADEV)
 
     # backfill actual_prices via yfinance if the pickle predates the field
     actual_prices = out.get("actual_prices")
@@ -66,17 +60,11 @@ if __name__ == "__main__":
     # derive month-start dates (scenario_prices DataFrames have integer index)
     dates = pd.date_range(start=start_date, periods=n_period, freq="MS")
 
-    # solve the prescient benchmark on the realized 2024 prices (single scenario)
-    print("Solving prescient benchmark on realized prices...")
-    prescient_sol = run_optimizer(
-        {
-            "positions": positions,
-            "tax_rate": tax_rate,
-            "model": model,
-            "tkr_adev": tkr_adev,
-            "monthly_prices": [actual_prices],
-        }
-    )
+    # load prescient sol from the prescient pickle instead of re-solving
+    print(f"Loading prescient benchmark from {PRESCIENT_INPUT_PKL}...")
+    with open(PRESCIENT_INPUT_PKL, "rb") as f:
+        prescient_out = pickle.load(f)
+    prescient_sol = prescient_out["sol"]
 
     plot_mpc_t0_cumulative_tax_cost(
         sol, dates, n_scenario, n_period, prescient_sol=prescient_sol

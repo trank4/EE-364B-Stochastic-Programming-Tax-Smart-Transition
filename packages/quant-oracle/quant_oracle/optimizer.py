@@ -22,8 +22,11 @@ class ForwardOptimizer:
     calling solve().
     """
 
+    TIME_LIMIT_SECONDS = 300  # 5-minute per-stage solve limit
+
     def __init__(self, inputs) -> None:
         self.model = gp.Model("forward_optimizer")
+        self.model.Params.TimeLimit = self.TIME_LIMIT_SECONDS
         self.inputs = inputs
 
         # infer number of period T from inputs

@@ -5,13 +5,20 @@ Steps:
   1. Select the top-20 S&P 500 constituents by market cap as of 2024-01-01.
   2. Download monthly price data for 2024 and compute realized monthly prices.
   3. Pass the price matrix to ForwardOptimizer and run build() / solve().
+  4. Pickle the optimizer output and inputs to PRESCIENT_OUTPUT_PKL for
+     downstream analysis by analyze_prescient_case.py and analyze_mpc.py
+     (which uses the prescient sol as a perfect-foresight benchmark) so that
+     the optimizer does not need to be re-run.
 
 "Prescient" means perfect foresight: the optimizer sees the full realized
 price path for 2024, serving as an upper-bound benchmark against which
 stochastic (multi-scenario) solutions are compared.
 """
 
-from quant_oracle.analysis_utils import *
+import pickle
+
+import pandas as pd
+from quant_oracle.analysis_utils import fetch_monthly_price
 from quant_oracle.optimizer import run_optimizer
 
 top20_spy_tickers = [
@@ -36,6 +43,8 @@ top20_spy_tickers = [
     "HD",
     "KO",
 ]
+
+PRESCIENT_OUTPUT_PKL = "prescient_output.pkl"
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -70,26 +79,27 @@ if __name__ == "__main__":
     # monthly_prices is wrapped in a list because the optimizer accepts a
     # per-scenario list of price DataFrames; the prescient case is a single
     # scenario with the realized 2024 prices.
+    tkr_adev = 0.05
     inputs = {
         "positions": positions,
         "tax_rate": tax_rate,
         "model": model,
-        "tkr_adev": 0.05,
+        "tkr_adev": tkr_adev,
         "monthly_prices": [monthly_prices],
     }
     # build and run optimizer
     sol = run_optimizer(inputs)
 
-    plot_cumulative_tax_cost(sol, monthly_prices)
-    plot_portfolio_value(sol, monthly_prices)
-
-    weights_df = calculate_portfolio_weights(sol, monthly_prices)
-    transition_pct = calculate_transition_pct(weights_df, model)
-    plot_transition_pct(transition_pct)
-    plot_ticker_weight_and_price(weights_df, monthly_prices, "AAPL")
-    print("\nPortfolio weights over time:")
-    print(weights_df.to_string())
-    print("\n% Transition over time:")
-    print(transition_pct.to_string())
-
-    print("\nDone.")
+    # persist everything analyze_prescient_case.py and analyze_mpc.py need so
+    # the optimizer does not have to re-run
+    output = {
+        "sol": sol,
+        "monthly_prices": monthly_prices,
+        "positions": positions,
+        "model": model,
+        "tax_rate": tax_rate,
+        "tkr_adev": tkr_adev,
+    }
+    with open(PRESCIENT_OUTPUT_PKL, "wb") as f:
+        pickle.dump(output, f)
+    print(f"\nSaved prescient output to {PRESCIENT_OUTPUT_PKL}")

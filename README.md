@@ -25,9 +25,10 @@ Course project for EE364B (Convex Optimization II) at Stanford. Implements stoch
 │           ├── RMPController.py             # RMPController class
 │           ├── Backtester.py                # Backtester class
 │           └── analysis_utils.py            # Plotting / metric helpers
-├── run_prescient_case.py                    # Prescient (perfect-foresight) runner
+├── run_prescient_case.py                    # Run prescient (perfect-foresight) optimizer, pickle solution
+├── analyze_prescient_case.py                # Load prescient pickle, plot prescient case
 ├── run_mpc.py                               # Run RMPController, pickle solution
-├── analyze_mpc.py                           # Load pickle, plot MPC t=0 plan vs prescient
+├── analyze_mpc.py                           # Load MPC + prescient pickles, plot MPC t=0 plan vs prescient
 ├── pyproject.toml                           # Root project (application, not a library)
 ├── poetry.toml                              # Poetry config (in-project virtualenv)
 ├── poetry.lock
@@ -372,18 +373,27 @@ Losses contribute negatively, so the optimizer is incentivized to harvest them. 
 - **Self-financing forces full investment.** Cash positions are not modeled; every sell dollar must be matched by a buy dollar in the same period (within each scenario). A zero-action period is allowed (both sums = 0).
 - **Wash-sale rule is local.** Only same-period buys and sells of the same ticker are blocked. Cross-period wash sales (real rule: 30 days) are not enforced.
 - **MIP gap is per-stage and auto-applied for multi-scenario.** When `n_scenario > 1`, a 5% relative MIP gap is set on the tax-cost stage of the lex hierarchy via `model.getMultiobjEnv(idx).setParam("MIPGap", 0.05)` — the deviation stages and the single-scenario case keep Gurobi's default tight gap. This trades a small optimality gap for a large speedup since the tax-cost stage is the expensive integer stage (binaries × scenarios).
+- **Per-stage time limit of 5 minutes.** `ForwardOptimizer` sets `model.Params.TimeLimit = 300` (`ForwardOptimizer.TIME_LIMIT_SECONDS`). Gurobi applies the main-model `TimeLimit` to each multi-objective stage, so each lex stage may run up to 5 minutes before returning the best incumbent. Combined with the 5% MIP gap on the tax-cost stage this caps the worst-case wall time of long solves.
 
 ---
 
 ## Running the Project
 
-### Prescient (perfect-foresight) benchmark
+### Prescient (perfect-foresight) benchmark — solve
 
 ```bash
 poetry run python run_prescient_case.py
 ```
 
-Builds a single-scenario `ForwardOptimizer` over realized 2024 prices (wrapped as a one-element list). Saves four PNGs:
+Builds a single-scenario `ForwardOptimizer` over realized 2024 prices (wrapped as a one-element list) and pickles the solution, realized prices, positions, model, `tax_rate`, and `tkr_adev` to `prescient_output.pkl`. The pickle is consumed both by `analyze_prescient_case.py` and by `analyze_mpc.py` (which uses the prescient `sol` as a perfect-foresight benchmark) so neither script has to re-run the optimizer.
+
+### Prescient analysis
+
+```bash
+poetry run python analyze_prescient_case.py
+```
+
+Loads `prescient_output.pkl` and produces four PNGs without re-solving:
 `cumulative_tax_cost.png`, `portfolio_value.png`, `transition_pct.png`, `AAPL_weight_and_price.png`.
 
 ### MPC t=0 plan
@@ -400,7 +410,7 @@ Runs `RMPController`: bootstrap `n_scenario` price paths from a historical windo
 poetry run python analyze_mpc.py
 ```
 
-Loads `mpc_output.pkl`, runs the prescient benchmark on the realized prices for comparison, and produces four overlay plots: cumulative tax cost, total portfolio value, % transition, and AAPL weight + price (dual axis). MPC-t=0 paths are translucent steelblue with a thick mean line; the prescient trajectory overlays as dashed crimson. Output PNGs: `mpc_t0_cumulative_tax_cost.png`, `mpc_t0_portfolio_value.png`, `mpc_t0_transition_pct.png`, `mpc_t0_AAPL_weight_and_price.png`.
+Loads `mpc_output.pkl` for the MPC t=0 plan and `prescient_output.pkl` for the prescient benchmark (run `run_prescient_case.py` first if the prescient pickle does not exist), then produces four overlay plots: cumulative tax cost, total portfolio value, % transition, and AAPL weight + price (dual axis). MPC-t=0 paths are translucent steelblue with a thick mean line; the prescient trajectory overlays as dashed crimson. Output PNGs: `mpc_t0_cumulative_tax_cost.png`, `mpc_t0_portfolio_value.png`, `mpc_t0_transition_pct.png`, `mpc_t0_AAPL_weight_and_price.png`.
 
 > The plots show the **t=0 plan** (one stochastic solve at the start), not a rolling MPC trajectory. The rolling case is `Backtester` and is not yet wrapped by an analysis script.
 
