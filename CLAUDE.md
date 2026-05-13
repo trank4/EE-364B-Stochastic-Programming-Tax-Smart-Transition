@@ -29,7 +29,7 @@ poetry run jupyter notebook
 ## Git Practices
 
 ### Commit messages
-Write clear, descriptive commit messages that enumerate the specific changes included — not just the intent. The subject line names the primary change; the body bullet-points each distinct file or logical change (e.g. `- Add optimizer.py with StoxOptimizer stub`). Use imperative mood. Never write vague labels like "update files" or "misc changes".
+Write clear, descriptive commit messages that enumerate the specific changes included — not just the intent. The subject line names the primary change; the body bullet-points each distinct file or logical change (e.g. `- Add optimizer.py with ForwardOptimizer stub`). Use imperative mood. Never write vague labels like "update files" or "misc changes".
 
 ### Staging new files
 After creating any new file, consider whether it belongs in the remote repo. If yes, `git add` it immediately. Skip generated artifacts and anything covered by `.gitignore` (`.venv/`, `__pycache__/`, `.env`, etc.).

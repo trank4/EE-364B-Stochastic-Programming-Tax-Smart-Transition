@@ -2,12 +2,12 @@ import math
 
 import numpy as np
 import pandas as pd
-from stochastic_optimizer.analysis_utils import fetch_monthly_price
-from stochastic_optimizer.optimizer import run_optimizer
+from quant_oracle.analysis_utils import fetch_monthly_price
+from quant_oracle.optimizer import run_optimizer
 
 
 def run_RMPController(inputs: dict) -> dict:
-    """Run a single stochastic-optimizer solve over bootstrapped scenarios."""
+    """Run a single quant-oracle solve over bootstrapped scenarios."""
     controller = RMPController(inputs)
     controller.build_price_scenarios()
     return controller.solve()
@@ -17,7 +17,7 @@ class RMPController:
     """
     Robust MPC controller. Single responsibility:
       1. Generate price scenarios via block bootstrap from a historical window.
-      2. Construct a StoxOptimizer with those scenarios + the input positions.
+      2. Construct a ForwardOptimizer with those scenarios + the input positions.
       3. Run a single solve and return the solution dict.
 
     Rolling forward in time with realized prices is delegated to Backtester.
@@ -41,7 +41,7 @@ class RMPController:
         historical return window. The first period of each scenario is anchored
         at the actual price observed on inputs["start_date"].
 
-        Expected inputs keys beyond the standard StoxOptimizer inputs:
+        Expected inputs keys beyond the standard ForwardOptimizer inputs:
           start_date     — date of the actual portfolio (ISO string or Timestamp)
           sim_start_date — start of historical window used for block bootstrap
           sim_end_date   — end of historical window
@@ -114,7 +114,7 @@ class RMPController:
 
     def solve(self) -> dict:
         """
-        Build a single StoxOptimizer with the bootstrapped scenarios and run it.
+        Build a single ForwardOptimizer with the bootstrapped scenarios and run it.
         Returns the optimizer's solution dict. Must be called after
         build_price_scenarios().
         """

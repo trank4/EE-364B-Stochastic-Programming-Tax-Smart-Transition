@@ -1,7 +1,7 @@
 [project]
-name = "stochastic-optimizer"
+name = "quant-oracle"
 version = "0.1.0"
-description = "Stochastic portfolio transition optimizer using Gurobi"
+description = "Quant oracle: stochastic portfolio transition optimizer using Gurobi"
 authors = [
     {name = "trank4"}
 ]

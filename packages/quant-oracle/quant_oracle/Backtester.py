@@ -1,5 +1,5 @@
 import pandas as pd
-from stochastic_optimizer.RMPController import RMPController
+from quant_oracle.RMPController import RMPController
 
 
 class Backtester:
@@ -92,7 +92,7 @@ class Backtester:
         purchase price (current_prices[tkr]), with amt marked at next_prices.
 
         The returned DataFrame is reset-indexed so its row indices match the
-        lot indices StoxOptimizer expects on the next build() call. It carries
+        lot indices ForwardOptimizer expects on the next build() call. It carries
         the columns the optimizer reads: tkr, amt, cost_basis_amt, shr,
         price, cost_basis_price.
         """

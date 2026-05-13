@@ -4,11 +4,11 @@ Course project for EE364B (Convex Optimization II) at Stanford. Implements stoch
 
 > **Status:** three composable layers are implemented:
 >
-> 1. **`StoxOptimizer`** — multi-scenario stochastic program (Gurobi-backed). One solve over a list of price scenarios produces a per-scenario plan.
+> 1. **`ForwardOptimizer`** — multi-scenario stochastic program (Gurobi-backed). One solve over a list of price scenarios produces a per-scenario plan.
 > 2. **`RMPController`** — robust MPC controller. Generates price scenarios via block bootstrap and runs a single t=0 stochastic solve.
 > 3. **`Backtester`** — rolling backtester. Uses an `RMPController` at each step to compute trades, then executes only the first-period trade against realized prices.
 >
-> The single-scenario "prescient" case is recovered by passing a one-element list of realized prices to `StoxOptimizer`.
+> The single-scenario "prescient" case is recovered by passing a one-element list of realized prices to `ForwardOptimizer`.
 
 ---
 
@@ -17,11 +17,11 @@ Course project for EE364B (Convex Optimization II) at Stanford. Implements stoch
 ```
 .
 ├── packages/
-│   └── stochastic-optimizer/                # Installable library (Gurobi-backed)
+│   └── quant-oracle/                # Installable library (Gurobi-backed)
 │       ├── pyproject.toml
-│       └── stochastic_optimizer/
+│       └── quant_oracle/
 │           ├── __init__.py
-│           ├── optimizer.py                 # StoxOptimizer class
+│           ├── optimizer.py                 # ForwardOptimizer class
 │           ├── RMPController.py             # RMPController class
 │           ├── Backtester.py                # Backtester class
 │           └── analysis_utils.py            # Plotting / metric helpers
@@ -38,22 +38,22 @@ Course project for EE364B (Convex Optimization II) at Stanford. Implements stoch
 
 ## Packages
 
-### `stochastic-optimizer` (`packages/stochastic-optimizer/`)
+### `quant-oracle` (`packages/quant-oracle/`)
 
 Reusable optimization library that wraps Gurobi. Declared as an editable path dependency of the root project.
 
-**Public API** (`from stochastic_optimizer import StoxOptimizer, RMPController, Backtester`):
+**Public API** (`from quant_oracle import ForwardOptimizer, RMPController, Backtester`):
 
 | Class | File | Description |
 |---|---|---|
-| `StoxOptimizer` | `optimizer.py` | Multi-scenario stochastic optimizer (Gurobi MIP) |
+| `ForwardOptimizer` | `optimizer.py` | Multi-scenario stochastic optimizer (Gurobi MIP) |
 | `RMPController` | `RMPController.py` | Generates scenarios via block bootstrap, runs a single t=0 solve |
 | `Backtester` | `Backtester.py` | Rolling MPC backtest along an actual realized price path |
 
-**`StoxOptimizer` interface:**
+**`ForwardOptimizer` interface:**
 
 ```python
-class StoxOptimizer:
+class ForwardOptimizer:
     model: gp.Model                     # Gurobi model
     inputs: dict                        # see "inputs dict keys" below
     T: int                              # number of monthly filtration periods
@@ -95,11 +95,11 @@ class StoxOptimizer:
 
 ---
 
-### `RMPController` (`packages/stochastic-optimizer/stochastic_optimizer/RMPController.py`)
+### `RMPController` (`packages/quant-oracle/quant_oracle/RMPController.py`)
 
 Robust MPC controller. Single responsibility:
 1. Generate price scenarios via block bootstrap from a historical return window.
-2. Construct a multi-scenario `StoxOptimizer`.
+2. Construct a multi-scenario `ForwardOptimizer`.
 3. Run a single solve at $t=0$ and return the solution dict.
 
 The rolling/receding-horizon loop is **not** here — it lives in `Backtester`. `RMPController` just generates the t=0 plan.
@@ -117,10 +117,10 @@ class RMPController:
 
     def __init__(self, inputs: dict) -> None: ...
     def build_price_scenarios(self) -> None: ...   # populates self.scenario_prices
-    def solve(self) -> dict: ...                   # builds StoxOptimizer and solves once
+    def solve(self) -> dict: ...                   # builds ForwardOptimizer and solves once
 ```
 
-**Inputs** (in addition to the `StoxOptimizer` base inputs above; `monthly_prices` is generated internally and should not be supplied):
+**Inputs** (in addition to the `ForwardOptimizer` base inputs above; `monthly_prices` is generated internally and should not be supplied):
 
 | Key | Type | Description |
 |---|---|---|
@@ -142,11 +142,11 @@ $$p_t^{(s)} = p_{t-1}^{(s)} \odot (1 + r_t^{(s)}), \quad t = 1, \dots, T-1, \qqu
 
 The starting price is identical across scenarios (it is observed at $t=0$); divergence happens at $t=1$.
 
-**Solve.** Calls `StoxOptimizer(opt_inputs)` with `monthly_prices = self.scenario_prices`, then `build()` and `solve()`. Returns the optimizer's solution dict.
+**Solve.** Calls `ForwardOptimizer(opt_inputs)` with `monthly_prices = self.scenario_prices`, then `build()` and `solve()`. Returns the optimizer's solution dict.
 
 ---
 
-### `Backtester` (`packages/stochastic-optimizer/stochastic_optimizer/Backtester.py`)
+### `Backtester` (`packages/quant-oracle/quant_oracle/Backtester.py`)
 
 Rolling backtester for the receding-horizon MPC interpretation. At each period $t$ along an **actual** realized price path:
 
@@ -177,7 +177,7 @@ class Backtester:
 **Position update** (`Backtester._update_positions`). Given `f0_sol = sol["filtration"][(0, 1)]` (the first filtration of scenario 0):
 - For each existing lot $i$: `sell_shr_l[(i, 0)]` shares are removed (j=0 because all current holdings are starting lots in each fresh build). Remaining shares are revalued at $t+1$ prices; cost basis is scaled by the surviving fraction. Lots reduced to (near) zero are dropped.
 - For each ticker with `buy_shr_h[tkr] > 0`: a new lot is created with cost basis equal to the purchase price (period $t$ actual) and `amt` marked at $t+1$ actual.
-- The DataFrame is `reset_index()`'d so its row indices align with the lot indices the next `StoxOptimizer.build()` expects.
+- The DataFrame is `reset_index()`'d so its row indices align with the lot indices the next `ForwardOptimizer.build()` expects.
 
 ---
 
@@ -383,7 +383,7 @@ Losses contribute negatively, so the optimizer is incentivized to harvest them. 
 poetry run python run_prescient_case.py
 ```
 
-Builds a single-scenario `StoxOptimizer` over realized 2024 prices (wrapped as a one-element list). Saves four PNGs:
+Builds a single-scenario `ForwardOptimizer` over realized 2024 prices (wrapped as a one-element list). Saves four PNGs:
 `cumulative_tax_cost.png`, `portfolio_value.png`, `transition_pct.png`, `AAPL_weight_and_price.png`.
 
 ### MPC t=0 plan
@@ -392,7 +392,7 @@ Builds a single-scenario `StoxOptimizer` over realized 2024 prices (wrapped as a
 poetry run python run_mpc.py
 ```
 
-Runs `RMPController`: bootstrap `n_scenario` price paths from a historical window, build the multi-scenario `StoxOptimizer`, and run a single solve. The solution, scenarios, model, positions, realized prices, and config are pickled to `mpc_output.pkl` for downstream analysis.
+Runs `RMPController`: bootstrap `n_scenario` price paths from a historical window, build the multi-scenario `ForwardOptimizer`, and run a single solve. The solution, scenarios, model, positions, realized prices, and config are pickled to `mpc_output.pkl` for downstream analysis.
 
 ### MPC analysis with prescient overlay
 
@@ -440,8 +440,8 @@ poetry run jupyter notebook
 # Add a dependency to the root project
 poetry add <package>
 
-# Add a dependency to stochastic-optimizer
-cd packages/stochastic-optimizer && poetry add <package>
+# Add a dependency to quant-oracle
+cd packages/quant-oracle && poetry add <package>
 
 # Format all files manually
 poetry run black .
@@ -457,7 +457,7 @@ poetry run black .
 
 | Package | Purpose |
 |---|---|
-| `gurobipy` | Gurobi solver interface (used by `stochastic-optimizer`) |
+| `gurobipy` | Gurobi solver interface (used by `quant-oracle`) |
 | `numpy` / `scipy` | Numerical computation |
 | `pandas` | Data handling (prices, tax lots, positions) |
 | `yfinance` | Download historical price data from Yahoo Finance |

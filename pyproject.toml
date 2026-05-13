@@ -23,7 +23,7 @@ dependencies = [
 package-mode = false
 
 [tool.poetry.dependencies]
-stochastic-optimizer = {path = "packages/stochastic-optimizer", develop = true}
+quant-oracle = {path = "packages/quant-oracle", develop = true}
 
 
 [build-system]

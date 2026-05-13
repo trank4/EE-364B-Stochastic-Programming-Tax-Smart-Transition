@@ -4,15 +4,15 @@ Prescient-case benchmark for the stochastic portfolio transition optimizer.
 Steps:
   1. Select the top-20 S&P 500 constituents by market cap as of 2024-01-01.
   2. Download monthly price data for 2024 and compute realized monthly prices.
-  3. Pass the price matrix to StoxOptimizer and run build() / solve().
+  3. Pass the price matrix to ForwardOptimizer and run build() / solve().
 
 "Prescient" means perfect foresight: the optimizer sees the full realized
 price path for 2024, serving as an upper-bound benchmark against which
 stochastic (multi-scenario) solutions are compared.
 """
 
-from stochastic_optimizer.analysis_utils import *
-from stochastic_optimizer.optimizer import run_optimizer
+from quant_oracle.analysis_utils import *
+from quant_oracle.optimizer import run_optimizer
 
 top20_spy_tickers = [
     "AAPL",

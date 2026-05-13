@@ -1,7 +1,7 @@
 import pickle
 
-from stochastic_optimizer import RMPController
-from stochastic_optimizer.analysis_utils import *
+from quant_oracle import RMPController
+from quant_oracle.analysis_utils import *
 
 top20_spy_tickers = [
     "AAPL",

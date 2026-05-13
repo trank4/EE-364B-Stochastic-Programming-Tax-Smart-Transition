@@ -17,14 +17,14 @@ benchmark on the realized prices, and produces four overlay plots:
 import pickle
 
 import pandas as pd
-from stochastic_optimizer.analysis_utils import (
+from quant_oracle.analysis_utils import (
     fetch_monthly_price,
     plot_mpc_t0_cumulative_tax_cost,
     plot_mpc_t0_portfolio_value,
     plot_mpc_t0_ticker_weight_and_price,
     plot_mpc_t0_transition_pct,
 )
-from stochastic_optimizer.optimizer import run_optimizer
+from quant_oracle.optimizer import run_optimizer
 
 INPUT_PKL = "mpc_output.pkl"
 

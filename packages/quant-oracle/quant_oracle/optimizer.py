@@ -6,13 +6,13 @@ from gurobipy import GRB
 
 
 def run_optimizer(inputs: dict) -> dict:
-    optimizer = StoxOptimizer(inputs)
+    optimizer = ForwardOptimizer(inputs)
     optimizer.build()
     sol = optimizer.solve()
     return sol
 
 
-class StoxOptimizer:
+class ForwardOptimizer:
     """
     Stochastic portfolio transition optimizer backed by Gurobi.
 
@@ -23,7 +23,7 @@ class StoxOptimizer:
     """
 
     def __init__(self, inputs) -> None:
-        self.model = gp.Model("stochastic_optimizer")
+        self.model = gp.Model("forward_optimizer")
         self.inputs = inputs
 
         # infer number of period T from inputs

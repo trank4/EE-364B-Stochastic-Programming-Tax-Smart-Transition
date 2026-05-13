@@ -16,7 +16,7 @@ class StoxOptimizerWt:
     """
 
     def __init__(self, inputs) -> None:
-        self.model = gp.Model("stochastic_optimizer")
+        self.model = gp.Model("quant_oracle")
         self.inputs = inputs
 
         # infer number of period T from inputs
