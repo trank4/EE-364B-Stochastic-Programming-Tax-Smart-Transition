@@ -62,7 +62,6 @@ if __name__ == "__main__":
         "model": model,
         "positions": positions,
         "tkr_adev": 0.05,
-        "MIPGap": 0.05,
     }
 
     controller = RMPController(inputs)
