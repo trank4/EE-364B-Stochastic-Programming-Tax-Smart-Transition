@@ -4,7 +4,7 @@ Course project for EE364B (Convex Optimization II) at Stanford. Implements stoch
 
 > **Status:** three composable layers are implemented:
 >
-> 1. **`ForwardOptimizer`** — multi-scenario stochastic program (Gurobi-backed). One solve over a list of price scenarios produces a per-scenario plan.
+> 1. **`ForwardOptimizer`** — multi-scenario stochastic program (Gurobi-backed). One solve over a list of price scenarios produces a plan for ALL scenarios.
 > 2. **`RMPController`** — robust MPC controller. Generates price scenarios via block bootstrap and runs a single t=0 stochastic solve.
 > 3. **`Backtester`** — rolling backtester. Uses an `RMPController` at each step to compute trades, then executes only the first-period trade against realized prices.
 >
