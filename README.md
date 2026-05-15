@@ -6,7 +6,7 @@ Course project for EE364B (Convex Optimization II) at Stanford. Implements stoch
 >
 > 1. **`ForwardOptimizer`** — multi-scenario stochastic program (Gurobi-backed). One solve over a list of price scenarios produces a plan for ALL scenarios.
 > 2. **`RMPController`** — robust MPC controller. Generates price scenarios via block bootstrap and runs a single t=0 stochastic solve.
-> 3. **`Backtester`** — rolling backtester. Uses an `RMPController` at each step to compute trades, then executes only the first-period trade against realized prices.
+> 3. **`Backtester`** — rolling backtester with a receding horizon (anchored on a fixed target end date) and a rolling 1-year history window. Uses an `RMPController` at each step to compute trades, then executes only the first-period trade against realized prices. At the final step the current price is already realized, so it short-circuits to a single-scenario `ForwardOptimizer` solve.
 >
 > The single-scenario "prescient" case is recovered by passing a one-element list of realized prices to `ForwardOptimizer`.
 
@@ -29,6 +29,8 @@ Course project for EE364B (Convex Optimization II) at Stanford. Implements stoch
 ├── analyze_prescient_case.py                # Load prescient pickle, plot prescient case
 ├── run_mpc.py                               # Run RMPController, pickle solution
 ├── analyze_mpc.py                           # Load MPC + prescient pickles, plot MPC t=0 plan vs prescient
+├── run_backtest.py                          # Run rolling Backtester over 2024, pickle per-step results
+├── analyze_backtest.py                      # Load backtest + prescient pickles, plot backtest vs prescient
 ├── pyproject.toml                           # Root project (application, not a library)
 ├── poetry.toml                              # Poetry config (in-project virtualenv)
 ├── poetry.lock
@@ -149,12 +151,14 @@ The starting price is identical across scenarios (it is observed at $t=0$); dive
 
 ### `Backtester` (`packages/quant-oracle/quant_oracle/Backtester.py`)
 
-Rolling backtester for the receding-horizon MPC interpretation. At each period $t$ along an **actual** realized price path:
+Rolling backtester for the receding-horizon MPC interpretation, anchored on a fixed transition target date. At each period $t$ along an **actual** realized price path:
 
-1. Build a fresh `RMPController` with the current positions and `start_date = actual_prices.index[t]`.
-2. Generate scenarios from the most recent observed price; solve once.
-3. Execute only the first-period trades from the resulting plan (receding-horizon principle).
-4. Mark positions to market at $t+1$ actual prices and advance.
+1. Compute this step's remaining horizon $n^{(t)}_{\text{period}} = T_{\text{steps}} - t$ (shrinks by 1 each step so the target end date stays fixed).
+2. Compute this step's rolling history window: $\text{sim\_end} = \text{actual\_prices.index}[t]$, $\text{sim\_start} = \text{sim\_end} - \text{lookback\_months}$.
+3. If $n^{(t)}_{\text{period}} \ge 2$: build a fresh `RMPController` with the current positions, `start_date = actual_prices.index[t]`, `n_period = `$n^{(t)}_{\text{period}}$, and the rolling sim window. Generate scenarios, solve once.
+4. If $n^{(t)}_{\text{period}} = 1$: the current-period price is already realized, so bootstrapping is skipped — `ForwardOptimizer` is called directly on a single-row, single-scenario price built from `actual_prices.iloc[[t]]`.
+5. Execute only the first-period trades from the resulting plan (receding-horizon principle).
+6. Mark positions to market at $t+1$ actual prices and advance.
 
 **Interface:**
 
@@ -162,8 +166,14 @@ Rolling backtester for the receding-horizon MPC interpretation. At each period $
 class Backtester:
     base_inputs: dict
     actual_prices: pd.DataFrame           # rows = realized dates, cols = tickers
+    lookback_months: int                  # rolling history window length (default 12)
 
-    def __init__(self, base_inputs: dict, actual_prices: pd.DataFrame) -> None: ...
+    def __init__(
+        self,
+        base_inputs: dict,
+        actual_prices: pd.DataFrame,
+        lookback_months: int = 12,
+    ) -> None: ...
     def run(self) -> list[dict]: ...
 ```
 
@@ -172,8 +182,9 @@ class Backtester:
 | Key | Description |
 |---|---|
 | `t` | Time step index |
+| `n_period` | Remaining forecast horizon used at this step ($T_{\text{steps}} - t$) |
 | `positions_before` | `pd.DataFrame` snapshot entering this step |
-| `sol` | Full optimizer solution from `RMPController.solve()` at this step |
+| `sol` | Full optimizer solution at this step (multi-scenario `RMPController.solve()` for $n^{(t)}_{\text{period}} \ge 2$; single-scenario `ForwardOptimizer` for $n^{(t)}_{\text{period}} = 1$) |
 
 **Position update** (`Backtester._update_positions`). Given `f0_sol = sol["filtration"][(0, 1)]` (the first filtration of scenario 0):
 - For each existing lot $i$: `sell_shr_l[(i, 0)]` shares are removed (j=0 because all current holdings are starting lots in each fresh build). Remaining shares are revalued at $t+1$ prices; cost basis is scaled by the surviving fraction. Lots reduced to (near) zero are dropped.
@@ -412,7 +423,23 @@ poetry run python analyze_mpc.py
 
 Loads `mpc_output.pkl` for the MPC t=0 plan and `prescient_output.pkl` for the prescient benchmark (run `run_prescient_case.py` first if the prescient pickle does not exist), then produces four overlay plots: cumulative tax cost, total portfolio value, % transition, and AAPL weight + price (dual axis). MPC-t=0 paths are translucent steelblue with a thick mean line; the prescient trajectory overlays as dashed crimson. Output PNGs: `mpc_t0_cumulative_tax_cost.png`, `mpc_t0_portfolio_value.png`, `mpc_t0_transition_pct.png`, `mpc_t0_AAPL_weight_and_price.png`.
 
-> The plots show the **t=0 plan** (one stochastic solve at the start), not a rolling MPC trajectory. The rolling case is `Backtester` and is not yet wrapped by an analysis script.
+> The plots show the **t=0 plan** (one stochastic solve at the start), not a rolling MPC trajectory. The rolling case is `Backtester` — wrapped by `run_backtest.py` and `analyze_backtest.py` below.
+
+### Rolling backtest
+
+```bash
+poetry run python run_backtest.py
+```
+
+Runs `Backtester` over realized monthly prices from 01/2024 through 12/2024 (12 trade dates plus one extra month-end for marking-to-market). At each step the receding horizon shrinks by one ($n_{\text{period}} = 12, 11, \dots, 1$) and the rolling 12-month history window slides forward so the bootstrap reflects the most recently observed year. The final step ($n_{\text{period}} = 1$) bypasses bootstrap and solves a single-scenario `ForwardOptimizer` on the realized price. Per-step results, realized prices, model, positions, and config are pickled to `backtest_output.pkl`.
+
+### Backtest analysis with prescient overlay
+
+```bash
+poetry run python analyze_backtest.py
+```
+
+Loads `backtest_output.pkl` for the realized backtest trajectory and `prescient_output.pkl` for the prescient benchmark (run `run_prescient_case.py` first if the prescient pickle does not exist), then produces four overlay plots: cumulative tax cost, total portfolio value, % transition, and AAPL weight + price (dual axis). The backtest trajectory is solid steelblue; the prescient trajectory overlays as dashed crimson. Output PNGs: `backtest_cumulative_tax_cost.png`, `backtest_portfolio_value.png`, `backtest_transition_pct.png`, `backtest_AAPL_weight_and_price.png`.
 
 ---
 

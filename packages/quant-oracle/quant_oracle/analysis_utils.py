@@ -7,6 +7,9 @@ import yfinance as yf
 def fetch_monthly_price(tickers: list[str], start_date, end_date) -> pd.DataFrame:
     """
     Download daily adjusted closes and take the first observation of each month.
+    Forward-fills any gaps so month-start rows are never NaN for tickers that
+    have at least one earlier observation in the window (e.g. when the
+    nominal month-start is a non-trading day or has a halted print).
     """
     raw = yf.download(
         tickers,
@@ -19,8 +22,8 @@ def fetch_monthly_price(tickers: list[str], start_date, end_date) -> pd.DataFram
     # Align columns to requested tickers (some may have been delisted)
     raw = raw.reindex(columns=tickers)
 
-    # Month-start prices
-    monthly_prices = raw.resample("MS").first()
+    # Month-start prices, forward-filled across any missing months
+    monthly_prices = raw.resample("MS").first().ffill()
 
     return monthly_prices
 
@@ -519,4 +522,288 @@ def plot_mpc_t0_ticker_weight_and_price(
     fig.suptitle(f"{tkr} Weight and Price: MPC t=0 plan vs Prescient")
     fig.tight_layout()
     plt.savefig(f"mpc_t0_{tkr}_weight_and_price.png", dpi=150)
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Rolling backtest plotting helpers
+# ---------------------------------------------------------------------------
+
+
+def _backtest_realized_trajectory(
+    results: list[dict],
+    actual_prices: pd.DataFrame,
+) -> dict:
+    """
+    Extract realized backtest trajectories from a list of per-step Backtester
+    results. Each step contributes its first-period decisions (filtration
+    (0, 1)) and is marked to market at the actual price observed at the
+    decision moment — matching the price convention of plot_portfolio_value
+    (`monthly_prices.iloc[f]`).
+
+    Returns a dict with arrays of shape (n_steps,) or (n_steps, n_tkr) on the
+    full ticker universe of `actual_prices.columns`:
+        - tkrs              : list of tickers (column order from actual_prices)
+        - cum_tax           : (n_steps,) cumulative realized tax cost
+        - portfolio_value   : (n_steps,) post-trade portfolio value
+        - weights           : (n_steps, n_tkr) realized portfolio weights
+    """
+    tkrs = list(actual_prices.columns)
+    n_steps = len(results)
+    n_tkr = len(tkrs)
+
+    per_period_tax = np.zeros(n_steps)
+    portfolio_value = np.zeros(n_steps)
+    weights = np.zeros((n_steps, n_tkr))
+
+    for t, step in enumerate(results):
+        f_sol = step["sol"]["filtration"][(0, 1)]
+        per_period_tax[t] = f_sol.get("tax_cost", 0.0)
+        prices = actual_prices.iloc[t]
+        dollars = np.array([f_sol["shr_h"].get(tkr, 0.0) * prices[tkr] for tkr in tkrs])
+        total = dollars.sum()
+        portfolio_value[t] = total
+        if total > 0:
+            weights[t] = dollars / total
+
+    return {
+        "tkrs": tkrs,
+        "cum_tax": np.cumsum(per_period_tax),
+        "portfolio_value": portfolio_value,
+        "weights": weights,
+    }
+
+
+def plot_backtest_cumulative_tax_cost(
+    results: list[dict],
+    actual_prices: pd.DataFrame,
+    prescient_sol: dict | None = None,
+) -> None:
+    """
+    Plot realized cumulative tax cost of the rolling backtest, optionally
+    overlaying the prescient (perfect-foresight) trajectory as a dashed
+    crimson line. Saves to backtest_cumulative_tax_cost.png.
+    """
+    traj = _backtest_realized_trajectory(results, actual_prices)
+    n_steps = len(results)
+    dates = actual_prices.index[:n_steps]
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(
+        dates,
+        traj["cum_tax"],
+        marker="o",
+        color="steelblue",
+        linewidth=2,
+        label="backtest",
+    )
+
+    if prescient_sol is not None:
+        prescient_paths = _per_scenario_cumulative_tax(prescient_sol, 1, n_steps)
+        ax.plot(
+            dates,
+            prescient_paths[0],
+            color="crimson",
+            linewidth=2,
+            linestyle="--",
+            label="prescient",
+        )
+
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Cumulative Tax Cost ($)")
+    ax.set_title("Cumulative Realized Tax Cost: Backtest vs Prescient")
+    ax.xaxis.set_tick_params(rotation=45)
+    ax.legend()
+    fig.tight_layout()
+    plt.savefig("backtest_cumulative_tax_cost.png", dpi=150)
+    plt.show()
+
+
+def plot_backtest_portfolio_value(
+    results: list[dict],
+    actual_prices: pd.DataFrame,
+    prescient_sol: dict | None = None,
+) -> None:
+    """
+    Plot realized portfolio value of the rolling backtest, optionally
+    overlaying the prescient trajectory marked-to-market at realized prices
+    as a dashed crimson line. Saves to backtest_portfolio_value.png.
+    """
+    traj = _backtest_realized_trajectory(results, actual_prices)
+    n_steps = len(results)
+    dates = actual_prices.index[:n_steps]
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(
+        dates,
+        traj["portfolio_value"],
+        marker="o",
+        color="steelblue",
+        linewidth=2,
+        label="backtest",
+    )
+
+    if prescient_sol is not None:
+        prescient_tkrs = list(actual_prices.columns)
+        prescient_paths = _per_scenario_portfolio_value(
+            prescient_sol,
+            [actual_prices.iloc[:n_steps].reset_index(drop=True)],
+            prescient_tkrs,
+        )
+        ax.plot(
+            dates,
+            prescient_paths[0],
+            color="crimson",
+            linewidth=2,
+            linestyle="--",
+            label="prescient",
+        )
+
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Portfolio Value ($)")
+    ax.set_title("Total Portfolio Value: Backtest vs Prescient")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"${y:,.0f}"))
+    ax.xaxis.set_tick_params(rotation=45)
+    ax.legend()
+    fig.tight_layout()
+    plt.savefig("backtest_portfolio_value.png", dpi=150)
+    plt.show()
+
+
+def plot_backtest_transition_pct(
+    results: list[dict],
+    actual_prices: pd.DataFrame,
+    model: pd.DataFrame,
+    prescient_sol: dict | None = None,
+) -> None:
+    """
+    Plot realized % transition of the rolling backtest, optionally overlaying
+    the prescient trajectory as a dashed crimson line. Saves to
+    backtest_transition_pct.png.
+    """
+    traj = _backtest_realized_trajectory(results, actual_prices)
+    n_steps = len(results)
+    dates = actual_prices.index[:n_steps]
+    tkrs = traj["tkrs"]
+
+    tgt_series = model.set_index("tkr")["tgt_wt"]
+    tgt_arr = np.array([float(tgt_series.get(tkr, 0.0)) for tkr in tkrs])
+    diff = traj["weights"] - tgt_arr
+    sum_over = np.maximum(diff, 0.0).sum(axis=1)
+    sum_under = np.maximum(-diff, 0.0).sum(axis=1)
+    transition_pct = 1.0 - np.maximum(sum_over, sum_under)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(
+        dates,
+        transition_pct,
+        marker="o",
+        color="steelblue",
+        linewidth=2,
+        label="backtest",
+    )
+
+    if prescient_sol is not None:
+        prescient_tkrs = list(actual_prices.columns)
+        prescient_weights = _per_scenario_weights(
+            prescient_sol,
+            [actual_prices.iloc[:n_steps].reset_index(drop=True)],
+            prescient_tkrs,
+        )
+        prescient_paths = _per_scenario_transition_pct(
+            prescient_weights, prescient_tkrs, model
+        )
+        ax.plot(
+            dates,
+            prescient_paths[0],
+            color="crimson",
+            linewidth=2,
+            linestyle="--",
+            label="prescient",
+        )
+
+    ax.set_xlabel("Date")
+    ax.set_ylabel("% Transition")
+    ax.set_title("Portfolio Transition Progress: Backtest vs Prescient")
+    ax.set_ylim(0, 1)
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
+    ax.xaxis.set_tick_params(rotation=45)
+    ax.legend()
+    fig.tight_layout()
+    plt.savefig("backtest_transition_pct.png", dpi=150)
+    plt.show()
+
+
+def plot_backtest_ticker_weight_and_price(
+    results: list[dict],
+    actual_prices: pd.DataFrame,
+    tkr: str,
+    prescient_sol: dict | None = None,
+) -> None:
+    """
+    Dual-axis plot: realized portfolio weight of `tkr` (steelblue, left axis)
+    and realized market price (orange dashed, right axis) over the backtest
+    window. If `prescient_sol` is provided, overlay the prescient weight on
+    the left axis as a navy dashed line. Saves to
+    backtest_<tkr>_weight_and_price.png.
+    """
+    traj = _backtest_realized_trajectory(results, actual_prices)
+    n_steps = len(results)
+    dates = actual_prices.index[:n_steps]
+    tkr_idx = traj["tkrs"].index(tkr)
+    weights = traj["weights"][:, tkr_idx]
+    prices = actual_prices[tkr].iloc[:n_steps].values
+
+    fig, ax1 = plt.subplots(figsize=(10, 4))
+    ax1.plot(
+        dates,
+        weights,
+        marker="o",
+        color="steelblue",
+        linewidth=2,
+        label=f"backtest {tkr} weight",
+    )
+
+    if prescient_sol is not None:
+        prescient_tkrs = list(actual_prices.columns)
+        prescient_weights = _per_scenario_weights(
+            prescient_sol,
+            [actual_prices.iloc[:n_steps].reset_index(drop=True)],
+            prescient_tkrs,
+        )
+        ax1.plot(
+            dates,
+            prescient_weights[0, :, prescient_tkrs.index(tkr)],
+            color="navy",
+            linewidth=2,
+            linestyle="--",
+            label=f"prescient {tkr} weight",
+        )
+
+    ax1.set_xlabel("Date")
+    ax1.set_ylabel("Portfolio Weight", color="steelblue")
+    ax1.tick_params(axis="y", labelcolor="steelblue")
+    ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
+    ax1.xaxis.set_tick_params(rotation=45)
+
+    ax2 = ax1.twinx()
+    ax2.plot(
+        dates,
+        prices,
+        marker="s",
+        color="darkorange",
+        linestyle="--",
+        linewidth=2,
+        label=f"actual {tkr} price",
+    )
+    ax2.set_ylabel("Price ($)", color="darkorange")
+    ax2.tick_params(axis="y", labelcolor="darkorange")
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
+
+    fig.suptitle(f"{tkr} Weight and Price: Backtest vs Prescient")
+    fig.tight_layout()
+    plt.savefig(f"backtest_{tkr}_weight_and_price.png", dpi=150)
     plt.show()

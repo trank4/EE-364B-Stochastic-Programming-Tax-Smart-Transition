@@ -735,7 +735,10 @@ class ForwardOptimizer:
         is the expensive integer stage (binaries × scenarios) and is
         loosened to a 5% relative MIP gap via
         `model.getMultiobjEnv(idx).setParam("MIPGap", 0.05)`. The deviation
-        stages and the single-scenario case keep Gurobi's default tight gap.
+        stages and the single-scenario case — the prescient (perfect-
+        foresight) solve and the deterministic final step of a backtest
+        where the current-period price is already realized, so there is
+        no need to solve across paths — keep Gurobi's default tight gap.
         """
         tax_cost_idx = None
         for index, (name, (var, priority)) in enumerate(self.objectives.items()):
