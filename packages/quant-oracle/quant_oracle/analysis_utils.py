@@ -578,11 +578,14 @@ def plot_backtest_cumulative_tax_cost(
     results: list[dict],
     actual_prices: pd.DataFrame,
     prescient_sol: dict | None = None,
+    mpc_sol: dict | None = None,
+    mpc_n_scenario: int | None = None,
 ) -> None:
     """
     Plot realized cumulative tax cost of the rolling backtest, optionally
     overlaying the prescient (perfect-foresight) trajectory as a dashed
-    crimson line. Saves to backtest_cumulative_tax_cost.png.
+    crimson line and the mean of the MPC t=0 plan across scenarios as a
+    dashed seagreen line. Saves to backtest_cumulative_tax_cost.png.
     """
     traj = _backtest_realized_trajectory(results, actual_prices)
     n_steps = len(results)
@@ -595,7 +598,7 @@ def plot_backtest_cumulative_tax_cost(
         marker="o",
         color="steelblue",
         linewidth=2,
-        label="backtest",
+        label=f"backtest (total: ${traj['cum_tax'][-1]:,.0f})",
     )
 
     if prescient_sol is not None:
@@ -606,12 +609,24 @@ def plot_backtest_cumulative_tax_cost(
             color="crimson",
             linewidth=2,
             linestyle="--",
-            label="prescient",
+            label=f"prescient (total: ${prescient_paths[0][-1]:,.0f})",
+        )
+
+    if mpc_sol is not None and mpc_n_scenario is not None:
+        mpc_paths = _per_scenario_cumulative_tax(mpc_sol, mpc_n_scenario, n_steps)
+        mpc_mean = mpc_paths.mean(axis=0)
+        ax.plot(
+            dates,
+            mpc_mean,
+            color="seagreen",
+            linewidth=2,
+            linestyle="--",
+            label=f"MPC t=0 plan mean (total: ${mpc_mean[-1]:,.0f})",
         )
 
     ax.set_xlabel("Date")
     ax.set_ylabel("Cumulative Tax Cost ($)")
-    ax.set_title("Cumulative Realized Tax Cost: Backtest vs Prescient")
+    ax.set_title("Cumulative Tax Cost")
     ax.xaxis.set_tick_params(rotation=45)
     ax.legend()
     fig.tight_layout()
@@ -623,11 +638,15 @@ def plot_backtest_portfolio_value(
     results: list[dict],
     actual_prices: pd.DataFrame,
     prescient_sol: dict | None = None,
+    mpc_sol: dict | None = None,
+    mpc_scenario_prices: list[pd.DataFrame] | None = None,
 ) -> None:
     """
     Plot realized portfolio value of the rolling backtest, optionally
     overlaying the prescient trajectory marked-to-market at realized prices
-    as a dashed crimson line. Saves to backtest_portfolio_value.png.
+    as a dashed crimson line and the mean of the MPC t=0 plan portfolio
+    value across scenarios as a dashed seagreen line. Saves to
+    backtest_portfolio_value.png.
     """
     traj = _backtest_realized_trajectory(results, actual_prices)
     n_steps = len(results)
@@ -659,9 +678,23 @@ def plot_backtest_portfolio_value(
             label="prescient",
         )
 
+    if mpc_sol is not None and mpc_scenario_prices is not None:
+        mpc_tkrs = list(mpc_scenario_prices[0].columns)
+        mpc_paths = _per_scenario_portfolio_value(
+            mpc_sol, mpc_scenario_prices, mpc_tkrs
+        )
+        ax.plot(
+            dates,
+            mpc_paths.mean(axis=0)[:n_steps],
+            color="seagreen",
+            linewidth=2,
+            linestyle="--",
+            label="MPC t=0 plan mean",
+        )
+
     ax.set_xlabel("Date")
     ax.set_ylabel("Portfolio Value ($)")
-    ax.set_title("Total Portfolio Value: Backtest vs Prescient")
+    ax.set_title("Total Portfolio Value")
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"${y:,.0f}"))
     ax.xaxis.set_tick_params(rotation=45)
     ax.legend()
@@ -675,11 +708,14 @@ def plot_backtest_transition_pct(
     actual_prices: pd.DataFrame,
     model: pd.DataFrame,
     prescient_sol: dict | None = None,
+    mpc_sol: dict | None = None,
+    mpc_scenario_prices: list[pd.DataFrame] | None = None,
 ) -> None:
     """
     Plot realized % transition of the rolling backtest, optionally overlaying
-    the prescient trajectory as a dashed crimson line. Saves to
-    backtest_transition_pct.png.
+    the prescient trajectory as a dashed crimson line and the mean of the
+    MPC t=0 plan transition pct across scenarios as a dashed seagreen line.
+    Saves to backtest_transition_pct.png.
     """
     traj = _backtest_realized_trajectory(results, actual_prices)
     n_steps = len(results)
@@ -722,9 +758,22 @@ def plot_backtest_transition_pct(
             label="prescient",
         )
 
+    if mpc_sol is not None and mpc_scenario_prices is not None:
+        mpc_tkrs = list(mpc_scenario_prices[0].columns)
+        mpc_weights = _per_scenario_weights(mpc_sol, mpc_scenario_prices, mpc_tkrs)
+        mpc_paths = _per_scenario_transition_pct(mpc_weights, mpc_tkrs, model)
+        ax.plot(
+            dates,
+            mpc_paths.mean(axis=0)[:n_steps],
+            color="seagreen",
+            linewidth=2,
+            linestyle="--",
+            label="MPC t=0 plan mean",
+        )
+
     ax.set_xlabel("Date")
     ax.set_ylabel("% Transition")
-    ax.set_title("Portfolio Transition Progress: Backtest vs Prescient")
+    ax.set_title("Portfolio Transition Progress")
     ax.set_ylim(0, 1)
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
     ax.xaxis.set_tick_params(rotation=45)
@@ -739,13 +788,16 @@ def plot_backtest_ticker_weight_and_price(
     actual_prices: pd.DataFrame,
     tkr: str,
     prescient_sol: dict | None = None,
+    mpc_sol: dict | None = None,
+    mpc_scenario_prices: list[pd.DataFrame] | None = None,
 ) -> None:
     """
     Dual-axis plot: realized portfolio weight of `tkr` (steelblue, left axis)
     and realized market price (orange dashed, right axis) over the backtest
     window. If `prescient_sol` is provided, overlay the prescient weight on
-    the left axis as a navy dashed line. Saves to
-    backtest_<tkr>_weight_and_price.png.
+    the left axis as a navy dashed line. If `mpc_sol`/`mpc_scenario_prices`
+    are provided, overlay the mean MPC t=0 plan weight on the left axis as
+    a seagreen dashed line. Saves to backtest_<tkr>_weight_and_price.png.
     """
     traj = _backtest_realized_trajectory(results, actual_prices)
     n_steps = len(results)
@@ -780,6 +832,19 @@ def plot_backtest_ticker_weight_and_price(
             label=f"prescient {tkr} weight",
         )
 
+    if mpc_sol is not None and mpc_scenario_prices is not None:
+        mpc_tkrs = list(mpc_scenario_prices[0].columns)
+        mpc_weights = _per_scenario_weights(mpc_sol, mpc_scenario_prices, mpc_tkrs)
+        mpc_mean_weight = mpc_weights[:, :, mpc_tkrs.index(tkr)].mean(axis=0)
+        ax1.plot(
+            dates,
+            mpc_mean_weight[:n_steps],
+            color="seagreen",
+            linewidth=2,
+            linestyle="--",
+            label=f"MPC t=0 plan mean {tkr} weight",
+        )
+
     ax1.set_xlabel("Date")
     ax1.set_ylabel("Portfolio Weight", color="steelblue")
     ax1.tick_params(axis="y", labelcolor="steelblue")
@@ -803,7 +868,7 @@ def plot_backtest_ticker_weight_and_price(
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
 
-    fig.suptitle(f"{tkr} Weight and Price: Backtest vs Prescient")
+    fig.suptitle(f"{tkr} Weight and Price")
     fig.tight_layout()
     plt.savefig(f"backtest_{tkr}_weight_and_price.png", dpi=150)
     plt.show()

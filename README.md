@@ -388,6 +388,26 @@ Losses contribute negatively, so the optimizer is incentivized to harvest them. 
 
 ---
 
+## Analysis Metrics
+
+### % Transition
+
+A scalar in $[0, 1]$ that summarizes how close the realized portfolio is to the target model weights at any point in time. Plotted by `plot_transition_pct`, `plot_mpc_t0_transition_pct`, and `plot_backtest_transition_pct`, and computed by `calculate_transition_pct` / `_per_scenario_transition_pct` in `quant_oracle.analysis_utils`.
+
+Let $w_{k,f}$ be the portfolio's realized dollar weight of ticker $k$ at filtration $f$ (computed from `shr_h` and the prevailing price) and let $w^{*}_{k}$ be the target weight. Define per-ticker over- and under-weights:
+
+$$o_{k,f} = \max(0,\, w_{k,f} - w^{*}_{k}), \qquad u_{k,f} = \max(0,\, w^{*}_{k} - w_{k,f}).$$
+
+Then
+
+$$\text{transition\_pct}_f \;=\; 1 \;-\; \max\!\left(\sum_{k} o_{k,f},\; \sum_{k} u_{k,f}\right).$$
+
+**Interpretation.** When the portfolio matches the model exactly, every $o_{k,f} = u_{k,f} = 0$ and the metric is $1.0$ (100% transitioned). At the starting position — a single concentrated lot — both sums equal the total active weight distance from the target, and the metric reflects how far the portfolio has drifted away from $w^{*}$. Because portfolio weights and target weights each sum to $1$, $\sum_k o_{k,f} = \sum_k u_{k,f}$ whenever the portfolio and the model share the same ticker universe, so the $\max$ is a defensive choice that handles the general case (off-model tickers contributing only to $o_{k,f}$, or vice versa).
+
+**Why this metric, not L1 distance.** The total absolute deviation $\sum_k |w_{k,f} - w^{*}_{k}|$ equals $\sum_k o_{k,f} + \sum_k u_{k,f}$. Splitting into over- vs under-weight and taking the $\max$ — rather than the sum — gives a tighter bound that does not double-count the same misallocation on both sides of the balance, so the metric stays in $[0, 1]$ and reads as "fraction of target weight that the portfolio has already reached."
+
+---
+
 ## Running the Project
 
 ### Prescient (perfect-foresight) benchmark — solve
@@ -439,7 +459,7 @@ Runs `Backtester` over realized monthly prices from 01/2024 through 12/2024 (12 
 poetry run python analyze_backtest.py
 ```
 
-Loads `backtest_output.pkl` for the realized backtest trajectory and `prescient_output.pkl` for the prescient benchmark (run `run_prescient_case.py` first if the prescient pickle does not exist), then produces four overlay plots: cumulative tax cost, total portfolio value, % transition, and AAPL weight + price (dual axis). The backtest trajectory is solid steelblue; the prescient trajectory overlays as dashed crimson. Output PNGs: `backtest_cumulative_tax_cost.png`, `backtest_portfolio_value.png`, `backtest_transition_pct.png`, `backtest_AAPL_weight_and_price.png`.
+Loads `backtest_output.pkl` for the realized backtest trajectory, `prescient_output.pkl` for the prescient benchmark, and `mpc_output.pkl` for the MPC t=0 plan (run `run_prescient_case.py` and `run_mpc.py` first if their pickles do not exist). Produces four overlay plots: cumulative tax cost, total portfolio value, % transition, and AAPL weight + price (dual axis). The backtest trajectory is solid steelblue; the prescient trajectory overlays as dashed crimson; the cross-scenario mean of the MPC t=0 plan overlays as dashed seagreen. The cumulative tax-cost plot also reports the total at horizon end for each series in its legend. Output PNGs: `backtest_cumulative_tax_cost.png`, `backtest_portfolio_value.png`, `backtest_transition_pct.png`, `backtest_AAPL_weight_and_price.png`.
 
 ---
 
