@@ -665,7 +665,9 @@ class ForwardOptimizer:
     def build_tax_cost_objective(self):
         """
         Minimize the average (across equally-likely scenarios) total realized
-        tax cost across all sells and filtrations.
+        tax cost across all sells and filtrations, with a geometric discount
+        gamma^(f-1) applied per filtration so earlier-period tax cost is
+        weighted more heavily than later-period tax cost.
 
         For each (s, f), a per-period tax cost variable
 
@@ -677,18 +679,32 @@ class ForwardOptimizer:
         over existing lots E_f only (sell_shr_l doesn't exist for new lots).
         The objective is
 
-            E_s[ sum_{f=1..T} tax_cost[s, f] ] = (1/S) sum_s sum_f tax_cost[s, f]
+            E_s[ sum_{f=1..T} gamma^(f-1) * tax_cost[s, f] ]
+              = (1/S) sum_s sum_f gamma^(f-1) * tax_cost[s, f]
+
+        With gamma < 1 the optimizer prefers to realize losses early (a more
+        negative immediate contribution beats a discounted later one) and to
+        defer gains (a discounted later gain costs less than the same gain
+        today). gamma defaults to 1.0, which recovers the un-discounted
+        objective.
+
+        Note: filtration[(s, f)]["tax_cost"] holds the un-discounted per-period
+        realized tax cost (the actual dollar amount), so downstream plots and
+        analyses keep reporting realized tax in dollar terms regardless of
+        gamma.
 
         Negative contributions (losses) are kept so the optimizer can harvest
         them — the objective variable has lb = -inf accordingly. Registered at
         priority 0 (lowest in the lex hierarchy).
         """
+        gamma = self.inputs.get("gamma", 1.0)
+
         total_tax_cost = self.model.addVar(lb=-GRB.INFINITY, name="total_tax_cost")
         self.objectives["total_tax_cost"] = [total_tax_cost, 0]
 
         scenario_tax_cost_sums = []
         for s in range(self.n_scenario):
-            scenario_tax_cost_vars = []
+            scenario_tax_cost_terms = []
             for f in range(1, self.T + 1):
                 filtration = self.filtration[(s, f)]
                 lot_tax_cost_list = []
@@ -713,10 +729,11 @@ class ForwardOptimizer:
                     name=f"tax_cost_def(f={f},s={s})",
                 )
                 # reserved per (s, f) for downstream plotting / inspection
+                # (un-discounted, in actual dollars)
                 filtration["tax_cost"] = tax_cost_f
-                scenario_tax_cost_vars.append(tax_cost_f)
+                scenario_tax_cost_terms.append((gamma ** (f - 1)) * tax_cost_f)
 
-            scenario_tax_cost_sums.append(gp.quicksum(scenario_tax_cost_vars))
+            scenario_tax_cost_sums.append(gp.quicksum(scenario_tax_cost_terms))
 
         self.model.addConstr(
             total_tax_cost == gp.quicksum(scenario_tax_cost_sums) / self.n_scenario,

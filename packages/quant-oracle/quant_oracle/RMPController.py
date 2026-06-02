@@ -125,4 +125,6 @@ class RMPController:
             "tkr_adev": self.inputs["tkr_adev"],
             "monthly_prices": self.scenario_prices,
         }
+        if "gamma" in self.inputs:
+            opt_inputs["gamma"] = self.inputs["gamma"]
         return run_optimizer(opt_inputs)

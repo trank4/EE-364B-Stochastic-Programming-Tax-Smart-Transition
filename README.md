@@ -93,6 +93,7 @@ class ForwardOptimizer:
 | `model` | `pd.DataFrame` | Target model portfolio (`tkr`, `tgt_wt`) |
 | `monthly_prices` | `list[pd.DataFrame]` | One DataFrame per scenario; each has month-start prices (rows = periods, cols = tickers) |
 | `tkr_adev` | `float` | Allowed weight deviation band (decimal) around target at intermediate filtrations, e.g. `0.05` = ±5% |
+| `gamma` | `float` *(optional)* | Geometric per-period discount applied to tax cost. Filtration `f` contributes `gamma**(f-1) * tax_cost_f` to the objective. Default `1.0` (no discount). With `gamma < 1` the optimizer prefers to realize losses early and defer gains. |
 
 **Dependencies:** `gurobipy >= 11.0.0`, `numpy`, `pandas`
 
@@ -366,11 +367,11 @@ Total realized gain/loss across all sells, decomposed per filtration and then su
 
 $$\text{tc}_f = \tau \sum_{(i,j)\in\mathcal{E}_f} s^{l}_{i,j,f} \cdot (p_{\text{ticker}(i),f} - c_{i,j}),$$
 
-and stored in `self.filtration[f]["tax_cost"]` for post-solve inspection. The aggregate objective is
+and stored in `self.filtration[f]["tax_cost"]` (un-discounted, in actual dollars) for post-solve inspection. The aggregate objective is geometrically discounted at rate $\gamma \in (0, 1]$ (from `inputs["gamma"]`, default $1.0$):
 
-$$\min \sum_f \text{tc}_f.$$
+$$\min \sum_{f=1}^{T} \gamma^{f-1}\, \text{tc}_f.$$
 
-Losses contribute negatively, so the optimizer is incentivized to harvest them. The objective variable has $\text{lb} = -\infty$.
+Losses contribute negatively, so the optimizer is incentivized to harvest them. With $\gamma < 1$ a $1 loss harvested now reduces the objective by $1, while the same $1 loss harvested at filtration $f$ only reduces it by $\gamma^{f-1}$, so the optimizer prefers to **realize losses early** and **defer gains** — the standard tax-deferral calculus. $\gamma = 1$ recovers the un-discounted sum, so existing solves (prescient, t=0 MPC, backtest) keep their previous behavior unless `gamma` is set. The objective variable has $\text{lb} = -\infty$.
 
 ---
 
@@ -381,6 +382,7 @@ Losses contribute negatively, so the optimizer is incentivized to harvest them. 
 - **Decision-then-state ordering within a filtration.** Within each filtration $f$ the buy/sell decisions are made first and `lot_shr[(s, f)]` is the resulting post-decision state. A new lot purchased at $f$ (column $j = f$) appears in the same filtration as the buy that created it. There are $T$ trading periods (one per filtration $f = 1, \dots, T$).
 - **Per-(s, f) variable layout.** Each filtration entry carries `lot_shr` (all lots in $\mathcal{L}_f$), `shr_h`, `buy_shr_h`, `buy_h`, and the per-period `tax_cost` scalar (at all $f$); `sell_shr_l` (only on existing lots $\mathcal{E}_f$), and `sell_shr_h`, `sell_h` (only on tickers with existing lots); `trans_dev` (only at $1 \le f \le T-1$, the band-penalty range); and `terminal_dev` (only at $f = T$).
 - **Tax cost is dollar-denominated.** The objective is $\tau \cdot \text{realized gains}$ summed over $(s, f)$ and averaged over $s$, so its solved value is the actual expected tax bill in dollars. Multiplying by $\tau$ leaves the optimal trade-off unchanged but makes the objective magnitude interpretable. No short-term vs long-term distinction; loss harvesting is treated 1:1.
+- **Tax cost is time-discounted by `gamma`.** Each filtration's tax cost enters the objective as $\gamma^{f-1}\,\text{tc}_f$ (`gamma` defaults to $1.0$, leaving the un-discounted sum). $\gamma < 1$ biases the optimizer toward immediate loss harvesting and gain deferral — useful for rolling MPC, where deferred-harvest plans tend to evaporate at the next re-solve. The per-period `tax_cost` recorded in `self.filtration[(s, f)]["tax_cost"]` is the un-discounted realized dollar amount, so analysis plots remain in actual dollars regardless of `gamma`.
 - **Self-financing forces full investment.** Cash positions are not modeled; every sell dollar must be matched by a buy dollar in the same period (within each scenario). A zero-action period is allowed (both sums = 0).
 - **Wash-sale rule is local.** Only same-period buys and sells of the same ticker are blocked. Cross-period wash sales (real rule: 30 days) are not enforced.
 - **MIP gap is per-stage and auto-applied for multi-scenario.** When `n_scenario > 1`, a 5% relative MIP gap is set on the tax-cost stage of the lex hierarchy via `model.getMultiobjEnv(idx).setParam("MIPGap", 0.05)` — the deviation stages and the single-scenario case keep Gurobi's default tight gap. This trades a small optimality gap for a large speedup since the tax-cost stage is the expensive integer stage (binaries × scenarios).

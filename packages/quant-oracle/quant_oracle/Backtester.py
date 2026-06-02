@@ -123,6 +123,8 @@ class Backtester:
             "tkr_adev": self.base_inputs["tkr_adev"],
             "monthly_prices": [single_price],
         }
+        if "gamma" in self.base_inputs:
+            opt_inputs["gamma"] = self.base_inputs["gamma"]
         optimizer = ForwardOptimizer(opt_inputs)
         optimizer.build()
         return optimizer.solve()
