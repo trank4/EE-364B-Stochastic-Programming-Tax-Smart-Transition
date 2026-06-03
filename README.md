@@ -2,6 +2,8 @@
 
 Course project for EE364B (Convex Optimization II) at Stanford. Implements stochastic programming methods to optimize tax-smart portfolio transitions — minimizing tax impact while reallocating assets under uncertainty.
 
+📄 **Final report:** [`EE364_final_report__MPC_for_tax_smart_transition.pdf`](EE364_final_report__MPC_for_tax_smart_transition.pdf) — the full writeup of the methodology, MPC formulation, experiments (prescient benchmark, t=0 MPC plan, rolling backtest), and findings.
+
 > **Status:** three composable layers are implemented:
 >
 > 1. **`ForwardOptimizer`** — multi-scenario stochastic program (Gurobi-backed). One solve over a list of price scenarios produces a plan for ALL scenarios.
@@ -31,6 +33,7 @@ Course project for EE364B (Convex Optimization II) at Stanford. Implements stoch
 ├── analyze_mpc.py                           # Load MPC + prescient pickles, plot MPC t=0 plan vs prescient
 ├── run_backtest.py                          # Run rolling Backtester over 2024, pickle per-step results
 ├── analyze_backtest.py                      # Load backtest + prescient pickles, plot backtest vs prescient
+├── EE364_final_report__MPC_for_tax_smart_transition.pdf   # Final report (methodology, experiments, findings)
 ├── pyproject.toml                           # Root project (application, not a library)
 ├── poetry.toml                              # Poetry config (in-project virtualenv)
 ├── poetry.lock
@@ -200,7 +203,7 @@ class Backtester:
 
 We manage a portfolio over $T$ monthly periods. The investor starts with $L$ tax lots — existing stock positions each carrying a per-share cost basis — and wants to transition towards a target model portfolio of $N$ assets while minimizing capital gains taxes incurred along the way.
 
-At each filtration $f$, the optimizer decides how many shares of each lot to sell and how many shares of each model asset to buy, subject to a self-financing budget constraint (sell dollars equal buy dollars within the period). Selling at a profit triggers a capital gain; selling at a loss creates a capital loss. The objectives are minimized lexicographically: first the terminal weight deviation, then the realized tax cost.
+At each filtration $f$, the optimizer decides how many shares of each lot to sell and how many shares of each model asset to buy, subject to a self-financing budget constraint (sell dollars equal buy dollars within the period). Selling at a profit triggers a capital gain; selling at a loss creates a capital loss. The objectives are minimized lexicographically: first the terminal weight deviation, then the transitory (intermediate) weight deviation, then the realized tax cost.
 
 ---
 
@@ -336,9 +339,9 @@ The inequality $s^{l}_{i,j,f} \le \tilde{x}_{i,j,f}$ on existing lots is enforce
 
 ### Objectives
 
-The optimizer registers three objectives via Gurobi's hierarchical multi-objective interface (`setObjectiveN`) and minimizes them lexicographically. Higher priority is optimized first; lower priority is minimized subject to the higher priority being optimal. Objectives at the **same** priority are combined with equal weight (Gurobi default).
+The optimizer registers three objectives via Gurobi's hierarchical multi-objective interface (`setObjectiveN`) and minimizes them lexicographically. Higher priority is optimized first; lower priority is minimized subject to the higher priority staying optimal. The hierarchy is **terminal deviation (priority 2) → transitory deviation (priority 1) → tax cost (priority 0)**.
 
-#### Priority 1 — Terminal weight deviation (`build_terminal_deviation_objective`)
+#### Priority 2 — Terminal weight deviation (`build_terminal_deviation_objective`)
 
 Let $V_T = \sum_k p_{k,T}\, h_{k,T}$ be the final portfolio value. For each model ticker $k$, an auxiliary $\xi_k \ge 0$ bounds the absolute deviation:
 
@@ -359,7 +362,7 @@ Within the band both right-hand sides are $\le 0$, so $\zeta_{k,f}$ can stay at 
 
 $$\min \sum_{f=1}^{T-1} \sum_{k \in \text{model}} \zeta_{k,f}.$$
 
-This objective shares priority 1 with terminal deviation, so both are minimized jointly before tax cost.
+This objective sits at priority 1 — below terminal deviation (priority 2) and above tax cost (priority 0) — so it is minimized after the terminal target is locked in but before tax cost.
 
 #### Priority 0 — Realized tax cost (`build_tax_cost_objective`)
 
