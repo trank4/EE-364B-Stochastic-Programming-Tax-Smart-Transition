@@ -82,8 +82,8 @@ class ForwardOptimizer:
 3. `build_wash_sales_constraints` — sell aggregation, big-M indicator linking, buy/sell exclusivity, dollar self-financing (per scenario, all $f$).
 4. `build_lot_dynamics_constraints` — link consecutive filtrations within each scenario. At $f=1$ the prior shares are the input positions (so this method also anchors the initial holdings — no separate starting-lot constraint).
 5. `build_information_pattern_constraints` — non-anticipativity at the root: `lot_shr[(s, 1)]` must be identical across scenarios, which (because $f=1$ holdings are post-decision) directly forces the first-period sells/buys to be identical across scenarios.
-6. `build_terminal_deviation_objective` — average across scenarios of total absolute deviation from target weights at the final filtration $f=T$.
-7. `build_transitory_deviation_objective` — average across scenarios of total deviation outside the `±tkr_adev` band at intermediate post-decision states $f=1..T-1$.
+6. `build_terminal_deviation_objective` — sum across scenarios of total absolute deviation from target weights at the final filtration $f=T$.
+7. `build_transitory_deviation_objective` — sum across scenarios of total deviation outside the `±tkr_adev` band at intermediate post-decision states $f=1..T-1$.
 8. `build_tax_cost_objective` — average across scenarios of total realized gain/loss across all filtrations $f=1..T$; per-(s, f) `tax_cost_f` variables are reserved for downstream plotting.
 9. `set_objective_hierarchy` — register the three objectives with `setObjectiveN`. In the multi-scenario case (`n_scenario > 1`) a 5% relative MIP gap is applied to the tax-cost stage only, via Gurobi's multi-objective sub-environment; the deviation stages and the single-scenario case keep Gurobi's default tight gap.
 
@@ -91,7 +91,7 @@ class ForwardOptimizer:
 
 | Key | Type | Description |
 |---|---|---|
-| `positions` | `pd.DataFrame` | Starting portfolio. Columns: `tkr`, `amt`, `cost_basis_amt`, `shr` (shares). |
+| `positions` | `pd.DataFrame` | Starting portfolio. Columns read by the optimizer: `tkr`, `amt`, `shr` (shares), `cost_basis_price` (per-share cost basis). The run scripts derive `shr` and `cost_basis_price` from user-supplied `amt` and `cost_basis_amt`. |
 | `tax_rate` | `float` | Flat capital gains tax rate applied to realized gains |
 | `model` | `pd.DataFrame` | Target model portfolio (`tkr`, `tgt_wt`) |
 | `monthly_prices` | `list[pd.DataFrame]` | One DataFrame per scenario; each has month-start prices (rows = periods, cols = tickers) |
@@ -230,7 +230,7 @@ At each filtration $f$, the optimizer decides how many shares of each lot to sel
 | $p_{k,f}$ | Market price of ticker $k$ at filtration $f$ |
 | $w^{*}_{k}$ | Target portfolio weight for ticker $k$ |
 | $\tau$ | Flat capital gains tax rate (`tax_rate`) |
-| $\delta$ | Per-ticker weight tolerance band (`tkr_dev`); allows weight to deviate $\pm\delta$ from target at intermediate filtrations |
+| $\delta$ | Per-ticker weight tolerance band (`tkr_adev`); allows weight to deviate $\pm\delta$ from target at intermediate filtrations |
 | $c_{i,j}$ | Per-share cost basis of lot $(i, j)$ |
 
 For starting lots ($j = 0$), $c_{i,0} = \text{cb}_i \,/\, (\text{amt}_i / p_{\text{ticker}(i),\,1})$, where $\text{cb}_i$ and $\text{amt}_i$ are the `cost_basis_amt` and `amt` fields of position $i$. For purchased lots ($j \ge 1$), $c_{i,j} = p_{\text{ticker}(i),\,j}$ — the market price at filtration $j$, when the lot was opened.
@@ -380,7 +380,7 @@ Losses contribute negatively, so the optimizer is incentivized to harvest them. 
 
 ## Modeling Notes
 
-- **Multi-scenario, equally-likely.** All three objectives are averaged across the supplied scenarios with uniform weight $1/S$. Probability-weighted scenarios are not yet supported.
+- **Multi-scenario, equally-likely.** Scenarios are treated as equally likely. The tax-cost objective is averaged across scenarios (divided by $S$); the terminal- and transitory-deviation objectives are *summed* across scenarios — equivalent up to the constant factor $S$, since each lexicographic stage's argmin is invariant to positive scaling. Probability-weighted scenarios are not yet supported.
 - **Non-anticipativity at the root only.** The first-period decisions (`sell_shr_l[(s, 1)]`, `buy_shr_h[(s, 1)]`) are forced to be identical across scenarios via `build_information_pattern_constraints`, which pins `lot_shr[(s, 1)]` equal across $s$. Because `lot_shr[(s, 1)]` is the **post-decision** state at $f=1$ and every scenario starts from the same input positions, equal `lot_shr[(s, 1)]` directly forces equal first-period sells and buys. From $f \ge 2$ onward, decisions (sells, buys, holdings) are scenario-specific — this is the full-recourse stage.
 - **Decision-then-state ordering within a filtration.** Within each filtration $f$ the buy/sell decisions are made first and `lot_shr[(s, f)]` is the resulting post-decision state. A new lot purchased at $f$ (column $j = f$) appears in the same filtration as the buy that created it. There are $T$ trading periods (one per filtration $f = 1, \dots, T$).
 - **Per-(s, f) variable layout.** Each filtration entry carries `lot_shr` (all lots in $\mathcal{L}_f$), `shr_h`, `buy_shr_h`, `buy_h`, and the per-period `tax_cost` scalar (at all $f$); `sell_shr_l` (only on existing lots $\mathcal{E}_f$), and `sell_shr_h`, `sell_h` (only on tickers with existing lots); `trans_dev` (only at $1 \le f \le T-1$, the band-penalty range); and `terminal_dev` (only at $f = T$).
